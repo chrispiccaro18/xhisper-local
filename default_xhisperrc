@@ -1,6 +1,8 @@
 # xhisper configuration
 # Copy to ~/.config/xhisper/xhisperrc and customize
 # When in doubt, check by running 'xhisper --log'
+# Comments may follow a value ("key : value # note"); quote a value that
+# itself contains " #" to keep it.
 
 # Transcription Engine:
 # - parakeet : NVIDIA Parakeet TDT 0.6B via onnx-asr — more accurate than

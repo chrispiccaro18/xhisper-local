@@ -149,6 +149,14 @@ if [ -f "$CONFIG_FILE" ]; then
     # Skip comments and empty lines
     [[ "$key" =~ ^[[:space:]]*# ]] && continue
     [[ -z "$key" ]] && continue
+    # Drop an inline comment ("key : value # note"), which used to end up
+    # in the value. A "#" inside a quoted value, or one not preceded by
+    # whitespace ("C#"), is kept.
+    if [[ "$value" =~ ^[[:space:]]*\" ]]; then
+      [[ "$value" == *\"*\"* ]] && value="${value%\"*}\""  # cut after the closing quote
+    else
+      value="${value%%[[:space:]]#*}"
+    fi
 
     # Trim whitespace, then one pair of surrounding quotes from the value.
     # Parameter expansion, not echo | sed: two subshells per line added
