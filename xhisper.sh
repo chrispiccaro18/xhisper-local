@@ -1,14 +1,7 @@
 #!/bin/bash
 
-# Add CUDA library paths for faster-whisper.
-# pip-installed nvidia packages (cublas, cudnn, nvrtc) are not on the default
-# loader path, and ctranslate2 needs them when it runs the encoder on the GPU.
-# Resolve their lib dirs at runtime so this works for any python version.
-NV_LIBS=$(python3 -c "import os, site, sysconfig, glob; dirs = [sysconfig.get_paths()['purelib'], site.getusersitepackages()]; print(':'.join(d for base in dirs for d in glob.glob(os.path.join(base, 'nvidia', '*', 'lib')) if os.path.isdir(d)))" 2>/dev/null)
-# Ollama bundles a CUDA 12 runtime (cublas, cudart) directly in cuda_v12/ —
-# there is no lib/ subdir, and it is a fine libcublas.so.12 source for ctranslate2.
-[ -d /usr/local/lib/ollama/cuda_v12 ] && NV_LIBS="$NV_LIBS:/usr/local/lib/ollama/cuda_v12"
-export LD_LIBRARY_PATH="$NV_LIBS:$LD_LIBRARY_PATH"
+# When the hotkey fired, near enough: see wait_for_key_release
+SCRIPT_START_US=$(date +%s%6N)
 
 # xhisper v2.0
 # Dictate anywhere in Linux. Transcription at your cursor.
@@ -136,9 +129,15 @@ if [ -f "$CONFIG_FILE" ]; then
     [[ "$key" =~ ^[[:space:]]*# ]] && continue
     [[ -z "$key" ]] && continue
 
-    # Trim whitespace and quotes
-    key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
+    # Trim whitespace, then one pair of surrounding quotes from the value.
+    # Parameter expansion, not echo | sed: two subshells per line added
+    # ~0.1s to every keypress.
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value#\"}"
+    value="${value%\"}"
 
     case "$key" in
       transcription-engine) transcription_engine="$value" ;;
@@ -166,6 +165,20 @@ fi
 
 # Command-line mode overrides config
 [ -n "$POST_PROCESS_MODE" ] && post_process_mode="$POST_PROCESS_MODE"
+
+# Add CUDA library paths for faster-whisper.
+# pip-installed nvidia packages (cublas, cudnn, nvrtc) are not on the default
+# loader path, and ctranslate2 needs them when it runs the encoder on the GPU.
+# Resolve their lib dirs at runtime so this works for any python version.
+# Only when a GPU run is possible (whisper's auto device may pick CUDA): the
+# lookup starts a python3 process on every keypress.
+if [ "$model_device" = "cuda" ] || { [ "$transcription_engine" = "whisper" ] && [ "$model_device" != "cpu" ]; }; then
+  NV_LIBS=$(python3 -c "import os, site, sysconfig, glob; dirs = [sysconfig.get_paths()['purelib'], site.getusersitepackages()]; print(':'.join(d for base in dirs for d in glob.glob(os.path.join(base, 'nvidia', '*', 'lib')) if os.path.isdir(d)))" 2>/dev/null)
+  # Ollama bundles a CUDA 12 runtime (cublas, cudart) directly in cuda_v12/ —
+  # there is no lib/ subdir, and it is a fine libcublas.so.12 source for ctranslate2.
+  [ -d /usr/local/lib/ollama/cuda_v12 ] && NV_LIBS="$NV_LIBS:/usr/local/lib/ollama/cuda_v12"
+  export LD_LIBRARY_PATH="$NV_LIBS:$LD_LIBRARY_PATH"
+fi
 
 # Auto-start daemon if not running
 if ! pgrep -x xhispertoold > /dev/null; then
@@ -559,15 +572,56 @@ transcribe() {
   echo "$transcription"
 }
 
+# The hotkey's modifiers (e.g. the Alt+Shift of Alt+Shift+D) are usually
+# still held when this script starts, and keys typed meanwhile arrive
+# combined with them — Alt+Backspace deletes a whole word in many apps. The
+# old fixed 0.2s pauses happened to put the first keystroke 0.33-0.40s after
+# the keypress. Keep that margin, but measure it from the keypress, so work
+# done before the first keystroke no longer adds to it.
+KEY_RELEASE_MARGIN_US=350000
+
+wait_for_key_release() {
+  local remaining=$(( KEY_RELEASE_MARGIN_US - ($(date +%s%6N) - SCRIPT_START_US) ))
+  if (( remaining > 0 )); then
+    sleep "$(printf '%d.%06d' $(( remaining / 1000000 )) $(( remaining % 1000000 )))"
+  fi
+}
+
+# True if process $1 exits within ~0.3s (15 polls, 20ms apart)
+exits_within_status_grace() {
+  local i
+  for ((i = 0; i < 15; i++)); do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 0.02
+  done
+  return 1
+}
+
+# Stop pw-record and wait for it to exit. It finishes the WAV (the header's
+# sizes) as it exits, ~5ms after SIGTERM, so this replaces a fixed 0.2s
+# "buffer for flush". Gives up after 2s so a stuck recorder can't hang.
+stop_recording() {
+  local pids pid i
+  pids=$(pgrep -f "$PROCESS_PATTERN")
+  pkill -f "$PROCESS_PATTERN"
+  for pid in $pids; do
+    for ((i = 0; i < 200; i++)); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.01
+    done
+  done
+}
+
 # Main
 
-# Find recording process, if so then kill
+# Find recording process, if so then stop it
 if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
-  pkill -f "$PROCESS_PATTERN"; sleep 0.2 # Buffer for flush
-  delete_n_chars 14 # "(recording...)"
+  stop_recording
 
   # Check if recording is silent
   if is_silent "$RECORDING"; then
+    wait_for_key_release
+    delete_n_chars 14 # "(recording...)"
     type_text "(no sound detected)"
     sleep 0.6
     delete_n_chars 19 # "(no sound detected)"
@@ -575,9 +629,24 @@ if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
     exit 0
   fi
 
-  type_text "(transcribing...)"
-  TRANSCRIPTION=$(transcribe "$RECORDING")
-  delete_n_chars 17 # "(transcribing...)"
+  # Transcribe in the background while the hotkey is released. Show
+  # "(transcribing...)" only if it outlasts a grace period as long as typing
+  # and deleting the status takes on screen (~0.3s): for a short dictation it
+  # would only delay the text.
+  TRANSCRIPTION_FILE=$(mktemp)
+  transcribe "$RECORDING" > "$TRANSCRIPTION_FILE" &
+  transcribe_pid=$!
+  wait_for_key_release
+  delete_n_chars 14 # "(recording...)"
+  if exits_within_status_grace "$transcribe_pid"; then
+    wait "$transcribe_pid"
+  else
+    type_text "(transcribing...)"
+    wait "$transcribe_pid"
+    delete_n_chars 17 # "(transcribing...)"
+  fi
+  TRANSCRIPTION=$(< "$TRANSCRIPTION_FILE")
+  rm -f "$TRANSCRIPTION_FILE"
 
   # ASR mishear fixups (see apply_corrections) — applied before mode
   # detection and cleanup, so everything downstream sees corrected text
@@ -630,7 +699,7 @@ else
       --log-file "$LOGFILE" 2>>"$LOGFILE" &
   fi
 
-  sleep 0.2
+  wait_for_key_release
   type_text "(recording...)"
   pw-record --channels=1 --rate=16000 "$RECORDING"
 fi
