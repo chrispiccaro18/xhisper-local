@@ -19,7 +19,7 @@ Dictation at cursor for Linux. Now with **local transcription** (Parakeet/Whispe
 - 🕐 **Pause-safe long dictation** — thinking pauses never drop your words
 - 🚀 **GPU acceleration** with CUDA support (whisper engine)
 - 💻 **Works offline** after initial model download
-- ⌨️ **Types at cursor** in any application
+- ⌨️ **Types at cursor** in any application — or, with `insert-method: ibus`, inserts the whole dictation at once through IBus, with no clipboard and no keystrokes
 
 ## Installation
 
@@ -276,6 +276,19 @@ That's it — from the next dictation on, standard text goes through it (`post-p
 
 `post-process-standard` controls whether plain (non-command/email) text gets an AI pass: with `cleanup-model` set, `auto` runs the cheap cleanup pass (and `on` behaves the same); without it, `auto` skips the instruct LLM when the parakeet engine already punctuates (fastest) and `on` always formats (~1s+ extra per dictation). `off` never processes standard text. Command and email modes always use the instruct LLM.
 
+### Text Insertion
+- `insert-method`: `type` (default) or `ibus`
+
+`type` presses one key per character through the virtual keyboard: about 10ms per character, non-ASCII characters through the clipboard, and status messages like `(recording...)` typed and then deleted.
+
+`ibus` inserts the whole dictation as one commit through an IBus input method, the way Chinese and Japanese typists enter text:
+- Near-instant at any length, any Unicode, the clipboard is never touched, and terminals need no Ctrl+Shift+V. In terminals, newlines become spaces so a dictation can never run a command.
+- Status messages appear at the cursor as *preedit* text (the underlined, not-yet-final text of input methods). They never enter the document, so there is nothing to delete and nothing left behind if a step fails.
+- xhisper switches to its own input method only while a dictation runs, then restores yours. It passes every key through, so typing during a dictation works as usual.
+- Where no IBus text field has focus (the desktop, or apps without IBus support such as the VS Code snap, which ships without GTK's IBus module), xhisper notices and types instead.
+
+Requirements: IBus running (the GNOME default) and PyGObject with the IBus typelib, e.g. `sudo apt install python3-gi gir1.2-ibus-1.0` on Debian/Ubuntu/Pop!_OS or `sudo dnf install python3-gobject ibus-libs` on Fedora. The service runs under the system Python, so a virtualenv for onnx-asr doesn't need these. Tested on Pop!_OS 22.04 (GNOME on X11, IBus 1.5.26) in gedit, GNOME Terminal and Chrome, plus the typing fallback in the VS Code snap. On IBus 1.5.27 and later, the focus check uses IBus's documented `focus-in-id` signal; that path is untested.
+
 ### Other Settings
 - `silence-threshold`: Volume threshold for silence detection (dB, default -50)
 - `non-ascii-*-delay`: Timing for Unicode character pasting
@@ -306,7 +319,9 @@ This achieves ~1.5s end-to-end for standard dictation (transcription + the 0.6B 
 
 ## Troubleshooting
 
-**Terminal Applications**: Clipboard paste uses Ctrl+V, which doesn't work in terminal emulators (they require Ctrl+Shift+V). Remap Ctrl+V to paste in your terminal's settings, or use `--mode=command` for pure command transcription.
+**Terminal Applications**: Clipboard paste uses Ctrl+V, which doesn't work in terminal emulators (they require Ctrl+Shift+V). Remap Ctrl+V to paste in your terminal's settings, or use `--mode=command` for pure command transcription. With `insert-method: ibus` there is no paste: the text arrives as one IBus commit.
+
+**`insert-method: ibus` types instead**: `xhisper --log` says why (`no IBus text field has focus` or `input method unavailable`, with the service's own `ime:` lines). Check that IBus is running (`ibus engine` prints your input method) and that `/usr/bin/python3 -c "import gi; gi.require_version('IBus', '1.0')"` succeeds.
 
 **GPU not detected**: Ensure NVIDIA drivers and CUDA toolkit are installed. Run `nvidia-smi` to verify.
 
@@ -328,6 +343,7 @@ This is a fork of [xhisper](https://github.com/imaginalnika/xhisper) by [imagina
 - **Parakeet as the default transcription engine** (NVIDIA TDT 0.6B via onnx-asr) — ~2x more accurate than whisper-base in English, punctuates natively, runs fast on CPU; whisper remains available via `transcription-engine`
 - **Fast dictation cleanup via [Spokenly cleanup-1](https://huggingface.co/spokenly/cleanup-1)** — a 0.6B model purpose-built for cleaning dictated text (filler words, spoken corrections, numbers, email/web addresses), ~0.1-0.3s per dictation; the script auto-creates a tuned Ollama alias with the correct prompt format and greedy decoding
 - **LLM formatting only where it earns its latency** — an instruct LLM (e.g., Gemma) is reserved for command/email modes
+- **Text insertion through IBus** (`insert-method: ibus`) — the whole dictation as one input-method commit instead of key-by-key typing, with status messages as preedit text
 - **Long-dictation safety** — VAD segmentation for long clips, tunable pause threshold (`vad-min-silence-ms`), and timeout-killed formatting falls back to raw text instead of truncating
 - **Local Whisper transcription** via `faster-whisper` (no Groq API)
 - **AI formatting** with local LLM support via Ollama

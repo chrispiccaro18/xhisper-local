@@ -39,6 +39,12 @@ SCRIPT_START_US=$(date +%s%6N)
 #   (filler words, spoken corrections, numbers), e.g. Spokenly cleanup-1.
 #   When set it replaces the LLM for standard text (see post-process-standard);
 #   post-process-model then only serves command/email modes.
+# - insert-method : type (default) or ibus. type: key by key through the
+#   uinput daemon (~10ms per character, non-ASCII via the clipboard). ibus:
+#   the whole text as one commit through xhisper's IBus input method, with
+#   status messages shown as preedit text that never enters the document;
+#   falls back to typing where no IBus text field has focus. See
+#   xhisper_ime.py.
 # Note: model-language, transcription-prompt, and vad-min-silence-ms apply to
 # the whisper engine only; parakeet v2 is English-only, v3 auto-detects.
 
@@ -49,7 +55,8 @@ SCRIPT_START_US=$(date +%s%6N)
 # - Python 3 with onnx-asr (parakeet engine) and/or faster-whisper (whisper engine)
 # - make to build, sudo make install to install
 # Optional: ollama for command/email formatting and/or dictation cleanup
-#   (see cleanup-model below); CUDA toolkit for whisper on GPU
+#   (see cleanup-model below); CUDA toolkit for whisper on GPU; IBus with
+#   python3-gi and gir1.2-ibus-1.0 for insert-method ibus
 
 # Parse command-line arguments
 LOCAL_MODE=0
@@ -99,6 +106,9 @@ fi
 RECORDING="/tmp/xhisper.wav"
 LOGFILE="/tmp/xhisper.log"
 PROCESS_PATTERN="pw-record.*$RECORDING"
+# How the start press showed "(recording...)": "ime" (preedit) or "type"
+# (typed, so the stop press deletes it)
+STATUS_MODE_FILE="/tmp/xhisper.status-mode"
 
 # Default configuration
 transcription_engine="parakeet"
@@ -120,6 +130,7 @@ cleanup_model=""
 post_process_timeout=10
 post_process_mode="auto"
 post_process_standard="auto"
+insert_method="type"
 
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/xhisper/xhisperrc"
 
@@ -159,6 +170,7 @@ if [ -f "$CONFIG_FILE" ]; then
       post-process-timeout) post_process_timeout="$value" ;;
       post-process-mode) post_process_mode="$value" ;;
       post-process-standard) post_process_standard="$value" ;;
+      insert-method) insert_method="$value" ;;
     esac
   done < "$CONFIG_FILE"
 fi
@@ -217,6 +229,20 @@ if [ -z "$TRANSCRIPT_SCRIPT" ] || [ ! -f "$TRANSCRIPT_SCRIPT" ]; then
     echo "  - Run 'sudo make install' to install system-wide" >&2
     echo "  - Run 'xhisper --local' from the build directory" >&2
     exit 1
+fi
+
+# The input-method client (insert-method ibus); without it, type as usual
+IME_SCRIPT=""
+if [ "$insert_method" = "ibus" ]; then
+  if [ "$LOCAL_MODE" -eq 1 ]; then
+    IME_SCRIPT="$SCRIPT_DIR/xhisper_ime.py"
+  else
+    IME_SCRIPT="$(command -v xhisper_ime)"
+  fi
+  if [ -z "$IME_SCRIPT" ] || [ ! -f "$IME_SCRIPT" ]; then
+    echo "Warning: insert-method is ibus but xhisper_ime is not installed; typing instead" >> /tmp/xhisper.log
+    IME_SCRIPT=""
+  fi
 fi
 
 # Detect clipboard tool
@@ -635,38 +661,98 @@ stop_recording() {
   done
 }
 
+# Input method (insert-method ibus) — see xhisper_ime.py
+use_ime() {
+  [ -n "$IME_SCRIPT" ]
+}
+
+# Run the input-method client. It needs only the standard library, so the
+# python3 that runs transcription works; it starts the IBus service under a
+# Python that has PyGObject. Its errors and the service's log go to the log.
+ime_client() {
+  python3 "$IME_SCRIPT" "$@" 2>>"$LOGFILE"
+}
+
+# Replace the status message with preedit text: shown at the cursor but
+# never part of the document, so there is nothing to delete afterwards and
+# no hotkey modifiers to wait for
+ime_status() {
+  audit "PREEDIT [$1]"
+  ime_client status "$1"
+}
+
+# Insert the final text at the cursor. With the input method, commit it as
+# one string; type it key by key where no IBus text field has focus (the
+# desktop, apps without IBus support such as the VS Code snap) or if the
+# input method is unavailable.
+insert_text() {
+  local text="$1"
+  if use_ime; then
+    ime_client finish "$text"
+    case $? in
+      0) audit "COMMIT [${text:0:70}]"; return ;;
+      5) audit "COMMIT outcome unknown; not typing it again: [${text:0:70}]"; return ;;
+      3) audit "no IBus text field has focus; typing instead" ;;
+      *) audit "input method unavailable; typing instead" ;;
+    esac
+  fi
+  wait_for_key_release
+  type_text "$text"
+}
+
 # Main
 
 # Find recording process, if so then stop it
 if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
   stop_recording
 
+  # How the start press showed "(recording...)". No file: the start press is
+  # still setting up the input method (a very quick second press), so there
+  # is no typed status to delete.
+  STATUS_MODE=$(cat "$STATUS_MODE_FILE" 2>/dev/null)
+  rm -f "$STATUS_MODE_FILE"
+  if [ -z "$STATUS_MODE" ]; then
+    use_ime && STATUS_MODE="ime" || STATUS_MODE="type"
+  fi
+
   # Check if recording is silent
   if is_silent "$RECORDING"; then
-    wait_for_key_release
-    delete_n_chars 14 # "(recording...)"
-    type_text "(no sound detected)"
-    sleep 0.6
-    delete_n_chars 19 # "(no sound detected)"
+    if [ "$STATUS_MODE" = "ime" ]; then
+      ime_status "(no sound detected)"
+      sleep 0.6
+      ime_client end
+    else
+      wait_for_key_release
+      delete_n_chars 14 # "(recording...)"
+      type_text "(no sound detected)"
+      sleep 0.6
+      delete_n_chars 19 # "(no sound detected)"
+    fi
     rm -f "$RECORDING"
     exit 0
   fi
 
-  # Transcribe in the background while the hotkey is released. Show
-  # "(transcribing...)" only if it outlasts a grace period as long as typing
-  # and deleting the status takes on screen (~0.3s): for a short dictation it
-  # would only delay the text.
+  # Transcribe in the background while the hotkey is released
   TRANSCRIPTION_FILE=$(mktemp)
   transcribe "$RECORDING" > "$TRANSCRIPTION_FILE" &
   transcribe_pid=$!
-  wait_for_key_release
-  delete_n_chars 14 # "(recording...)"
-  if exits_within_status_grace "$transcribe_pid"; then
+  if [ "$STATUS_MODE" = "ime" ]; then
+    # A preedit status costs no keystrokes: show it right away
+    ime_status "(transcribing...)"
     wait "$transcribe_pid"
   else
-    type_text "(transcribing...)"
-    wait "$transcribe_pid"
-    delete_n_chars 17 # "(transcribing...)"
+    # Show "(transcribing...)" only if it outlasts a grace period as long as
+    # typing and deleting the status takes on screen (~0.3s): for a short
+    # dictation it would only delay the text.
+    wait_for_key_release
+    delete_n_chars 14 # "(recording...)"
+    if exits_within_status_grace "$transcribe_pid"; then
+      wait "$transcribe_pid"
+    else
+      type_text "(transcribing...)"
+      wait "$transcribe_pid"
+      delete_n_chars 17 # "(transcribing...)"
+    fi
   fi
   TRANSCRIPTION=$(< "$TRANSCRIPTION_FILE")
   rm -f "$TRANSCRIPTION_FILE"
@@ -681,9 +767,15 @@ if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
 
   # Engine failed (e.g. onnx-asr missing, model error) — errors are in the log
   if [ -z "$TRANSCRIPTION" ]; then
-    type_text "(transcription failed - see xhisper --log)"
-    sleep 1.5
-    delete_n_chars 42 # "(transcription failed - see xhisper --log)"
+    if [ "$STATUS_MODE" = "ime" ]; then
+      ime_status "(transcription failed - see xhisper --log)"
+      sleep 1.5
+      ime_client end
+    else
+      type_text "(transcription failed - see xhisper --log)"
+      sleep 1.5
+      delete_n_chars 42 # "(transcription failed - see xhisper --log)"
+    fi
     rm -f "$RECORDING"
     exit 1
   fi
@@ -695,24 +787,26 @@ if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
   effective_mode=""
   [ -n "$TRANSCRIPTION" ] && effective_mode=$(detect_mode "$TRANSCRIPTION" "$post_process_mode")
 
+  FINAL_TEXT="$TRANSCRIPTION"
   if [ -n "$effective_mode" ] && formatting_applies "$effective_mode" && \
      ! skip_standard_formatting "$effective_mode"; then
-    type_text "(formatting...)"
-    FORMATTED=$(post_process "$TRANSCRIPTION")
-    delete_n_chars 15 # "(formatting...)"
-    # Only paste if we got a result
-    if [ -n "$FORMATTED" ]; then
-      type_text "$FORMATTED"
+    if [ "$STATUS_MODE" = "ime" ]; then
+      ime_status "(formatting...)"
+      FORMATTED=$(post_process "$TRANSCRIPTION")
     else
-      type_text "$TRANSCRIPTION"
+      type_text "(formatting...)"
+      FORMATTED=$(post_process "$TRANSCRIPTION")
+      delete_n_chars 15 # "(formatting...)"
     fi
-  else
-    type_text "$TRANSCRIPTION"
+    # Only use the formatted text if we got a result
+    [ -n "$FORMATTED" ] && FINAL_TEXT="$FORMATTED"
   fi
+  insert_text "$FINAL_TEXT"
 
   rm -f "$RECORDING"
 else
   # No recording running, so start
+  rm -f "$STATUS_MODE_FILE"
 
   # Load the transcription model while the user speaks, so it is ready (or
   # nearly) when recording stops; a no-op if the server is already up
@@ -723,7 +817,34 @@ else
   fi
   preload_post_process_model &
 
-  wait_for_key_release
-  type_text "(recording...)"
-  pw-record --channels=1 --rate=16000 "$RECORDING"
+  if use_ime; then
+    # Record first: the input method's first use starts its service, and
+    # speech must not wait for that
+    pw-record --channels=1 --rate=16000 "$RECORDING" &
+    record_pid=$!
+    if ime_client begin "(recording...)" --log-file "$LOGFILE"; then
+      STATUS_MODE="ime"
+      audit "PREEDIT [(recording...)]"
+    else
+      STATUS_MODE="type"  # no IBus text field has focus
+    fi
+    if ! kill -0 "$record_pid" 2>/dev/null; then
+      # The second press already stopped the recording while the input method
+      # was starting, and has finished the dictation: show no status (a typed
+      # one would stay in the document), and clear the preedit one
+      [ "$STATUS_MODE" = "ime" ] && ime_client end
+      exit 0
+    fi
+    echo "$STATUS_MODE" > "$STATUS_MODE_FILE"
+    if [ "$STATUS_MODE" = "type" ]; then
+      wait_for_key_release
+      type_text "(recording...)"
+    fi
+    wait "$record_pid"
+  else
+    echo "type" > "$STATUS_MODE_FILE"
+    wait_for_key_release
+    type_text "(recording...)"
+    pw-record --channels=1 --rate=16000 "$RECORDING"
+  fi
 fi

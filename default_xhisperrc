@@ -75,6 +75,23 @@ non-ascii-default-delay : 0.025
 silence-threshold  : -50
 silence-percentage : 95
 
+# Text insertion:
+# - type : key by key through the virtual keyboard (default). ~10ms per
+#   character; non-ASCII characters go through the clipboard; status
+#   messages like "(recording...)" are typed and then deleted.
+# - ibus : the whole dictation as one IBus input-method commit, near-instant
+#   at any length, any Unicode, no clipboard, no Ctrl+Shift+V in terminals
+#   (newlines become spaces there, so a dictation can't run a command).
+#   Status messages show as preedit text at the cursor and never enter the
+#   document. xhisper switches to its pass-through input method only while
+#   a dictation runs, then restores yours. Where no IBus text field has
+#   focus (the desktop, apps without IBus support such as the VS Code snap)
+#   it types instead. Needs IBus running (GNOME's default) and PyGObject
+#   with the IBus typelib, e.g.:
+#     sudo apt install python3-gi gir1.2-ibus-1.0    (Debian/Ubuntu/Pop!_OS)
+#     sudo dnf install python3-gobject ibus-libs     (Fedora)
+insert-method : type
+
 # AI Post-Processing (optional):
 # Improve grammar, punctuation, and capitalization using local models via
 # Ollama — a fast dedicated cleanup model for standard text, and/or an

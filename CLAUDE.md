@@ -38,7 +38,8 @@ ollama pull gemma3:4b
 1. **xhispertoold** (C daemon) - Virtual keyboard via Linux uinput, listens on abstract Unix socket `@xhisper_socket`
 2. **xhispertool** (C client) - Communicates with daemon via socket; symlinked as `xhispertoold` for daemon mode
 3. **xhisper_transcribe.py** (Python) - Transcription via faster-whisper (whisper engine) or onnx-asr (parakeet engine, default); `--engine` dispatch. For parakeet it can also run as a transcription server (`--serve`) that keeps a warmed-up model loaded, on a socket in `$XDG_RUNTIME_DIR/xhisper/`; `--use-server` transcribes through it and falls back to a one-shot run
-4. **xhisper.sh** (Bash) - Main orchestrator: recording, transcription, AI formatting, typing
+4. **xhisper_ime.py** (Python) - IBus input method for `insert-method: ibus`. `--serve` runs a service (PyGObject; started under the system Python since the xhisper venv usually lacks `gi`) that registers a pass-through engine at runtime, activates it only during a dictation, shows statuses as preedit and commits the final text in one go; socket in `$XDG_RUNTIME_DIR/xhisper/`. The client commands (`begin`/`status`/`finish`/`end`) need only the standard library
+5. **xhisper.sh** (Bash) - Main orchestrator: recording, transcription, AI formatting, typing
 
 ### Data Flow
 
@@ -47,6 +48,8 @@ User presses hotkey → xhisper.sh toggles recording state
   ├─ First press: start the transcription server if not running (parakeet,
   │  transcription-server on) and preload the Ollama model post-processing
   │  will likely use → pw-record starts → types "(recording...)"
+  │  (insert-method ibus: shows it as preedit instead, unless no IBus
+  │  text field has focus)
   └─ Second press: kill pw-record → check silence
       ├─ Silent: type "(no sound detected)", exit
       └─ Not silent:
@@ -56,7 +59,8 @@ User presses hotkey → xhisper.sh toggles recording state
           │  "text:..." prompt; the tuned alias appends the "\nout:" marker),
           │  else instruct LLM per post-process-standard
           ├─ command/email text: instruct LLM (post-process-model)
-          └─ type result via daemon
+          └─ type result via daemon (insert-method ibus: commit it via
+             xhisper_ime; type only if no IBus text field has focus)
 ```
 
 ### Character Input
@@ -65,6 +69,8 @@ User presses hotkey → xhisper.sh toggles recording state
 - **Non-ASCII**: Clipboard paste (wl-copy/wl-paste or xclip)
 
 The `ascii2keycode_map` in xhispertool.c maps ASCII to Linux keycodes.
+
+With `insert-method: ibus`, the final text is one IBus commit (any Unicode, no clipboard; newlines become spaces when the field's input purpose is terminal). Focus check: IBus attaches the engine to an internal placeholder context when no app text field has focus and drops commits there. IBus >= 1.5.27 reports it via `focus-in-id` client "fake"; older IBus only via the placeholder's path, `InputContext_1` (an implementation detail). When a runtime-registered component goes away, ibus-daemon unsets an installed global engine (it only checks runtime-registered engines), so the service restores the user's engine after it exits (detached helper) and on its next start after a crash.
 
 ## Configuration
 
@@ -84,6 +90,7 @@ Key settings:
 - `post-process-standard`: AI pass for standard text — auto (run cleanup model if set, else skip when parakeet punctuates; default), on (always), off (never; command/email unaffected)
 - `post-process-mode`: auto, standard, command, email
 - `post-process-timeout`: Max seconds for LLM formatting (on timeout the raw transcription is kept)
+- `insert-method`: type (default; key by key via uinput) or ibus (one IBus commit, statuses as preedit, typing fallback where no IBus text field has focus; needs python3-gi + gir1.2-ibus-1.0)
 
 ## Command Line Options
 
