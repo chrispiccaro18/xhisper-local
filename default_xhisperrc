@@ -27,6 +27,12 @@ parakeet-model : nemo-parakeet-tdt-0.6b-v2
 transcription-server      : on
 transcription-server-idle : 5
 
+# Streaming (needs the transcription server): while you speak, the server
+# transcribes at your pauses, so a long dictation has little left to
+# transcribe when you stop. It only cuts the audio at sentence ends, and not
+# in the first 20s, so shorter dictations come out exactly as without it.
+transcription-streaming   : on
+
 # Whisper Model Settings (whisper engine only):
 # Available models: tiny, base, small, medium, large-v3
 # - tiny: fastest, least accurate (~1GB RAM)

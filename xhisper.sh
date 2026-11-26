@@ -16,6 +16,9 @@ SCRIPT_START_US=$(date +%s%6N)
 #   overlaps with speaking. Falls back to a one-shot run if unavailable.
 # - transcription-server-idle : minutes without a dictation before the server
 #   exits and frees the model's ~2.5GB (default 5; 0 = never)
+# - transcription-streaming : on or off (default on, needs the server). The
+#   server transcribes at pauses while you speak, so a long dictation has
+#   little left to transcribe at stop. Dictations under 20s are unaffected.
 # - model-name : Whisper model size (tiny, base, small, medium, large-v3)
 # - model-device : Device to use (auto, cpu, cuda). whisper: auto detects
 #   CUDA. parakeet: auto/cpu run on CPU (default, fast); cuda runs on the
@@ -119,6 +122,7 @@ transcription_engine="parakeet"
 parakeet_model="nemo-parakeet-tdt-0.6b-v2"
 transcription_server="on"
 transcription_server_idle=5
+transcription_streaming="on"
 model_name="base"
 model_device="auto"
 model_language=""
@@ -160,6 +164,7 @@ if [ -f "$CONFIG_FILE" ]; then
       parakeet-model) parakeet_model="$value" ;;
       transcription-server) transcription_server="$value" ;;
       transcription-server-idle) transcription_server_idle="$value" ;;
+      transcription-streaming) transcription_streaming="$value" ;;
       model-name) model_name="$value" ;;
       model-device) model_device="$value" ;;
       model-language) model_language="$value" ;;
@@ -598,6 +603,12 @@ use_transcription_server() {
   [ "$transcription_engine" = "parakeet" ] && [ "$transcription_server" = "on" ]
 }
 
+# Streaming: the server follows the recording as pw-record writes it and
+# transcribes at pauses — see the streaming section of xhisper_transcribe.py
+use_streaming() {
+  use_transcription_server && [ "$transcription_streaming" = "on" ]
+}
+
 transcribe() {
   local recording="$1"
   local logging_start=$(date +%s%N)
@@ -825,12 +836,19 @@ else
   # No recording running, so start
   rm -f "$STATUS_MODE_FILE"
 
+  # Nothing is recording, so a file left here is from an interrupted run;
+  # streaming must not mistake it for the new recording
+  rm -f "$RECORDING"
+
   # Load the transcription model while the user speaks, so it is ready (or
-  # nearly) when recording stops; a no-op if the server is already up
+  # nearly) when recording stops; a no-op if the server is already up. With
+  # streaming, the server also starts following the recording.
   if use_transcription_server; then
+    stream_args=()
+    use_streaming && stream_args=(--watch "$RECORDING")
     python3 "$TRANSCRIPT_SCRIPT" --start-server --parakeet-model "$parakeet_model" \
       --device "$model_device" --idle-minutes "$transcription_server_idle" \
-      --log-file "$LOGFILE" 2>>"$LOGFILE" &
+      --log-file "$LOGFILE" "${stream_args[@]}" 2>>"$LOGFILE" &
   fi
   preload_post_process_model &
 

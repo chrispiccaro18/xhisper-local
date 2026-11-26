@@ -184,6 +184,7 @@ Configuration is read from `~/.config/xhisper/xhisperrc`:
 | `parakeet-model` | onnx-asr model name | `nemo-parakeet-tdt-0.6b-v2` |
 | `transcription-server` | Keep the parakeet model loaded between dictations (`on`/`off`) | `on` (default) |
 | `transcription-server-idle` | Minutes without a dictation before the server frees the model; `0` = never | `5` (default) |
+| `transcription-streaming` | Transcribe at your pauses while you speak, so long dictations have little left at stop (`on`/`off`, needs the server) | `on` (default) |
 
 **Why Parakeet?** It's ~2x more accurate than whisper-base in English and outputs punctuated, capitalized text natively — so standard dictation skips the LLM formatting pass entirely (faster, no Gemma spin-up). Gemma is still used for `command` and `email` modes. Long recordings (>25s) are automatically segmented with Silero VAD so nothing after a thinking pause is lost. First use downloads ~1GB to `~/.cache/xhisper/parakeet`.
 
@@ -196,6 +197,8 @@ Configuration is read from `~/.config/xhisper/xhisperrc`:
 | Server already loaded | 6.6s | 1.7s |
 | First dictation, 7s of speaking | 6.6s | 2.6s |
 | First dictation, 1.5s of speaking | 6.6s | 6.1s |
+
+**Streaming:** with `transcription-streaming : on` (the default), the server follows the recording as pw-record writes it and transcribes at your pauses, so when you stop a long dictation most of it is already done. Pieces transcribed separately can get punctuated or lose a word where they meet, so it only cuts the audio where Parakeet ended a sentence that two passes in a row agree on, and it cuts nothing in the first 20s: shorter dictations come out exactly as without streaming. On the i5-12500H laptop, dictations of 37-67s were transcribed 0.05-0.9s after the second keypress instead of 2.2-2.8s, and with fewer punctuation slips than the >25s VAD path, which cuts every 20s even mid-word. The passes keep the CPU busy for about a fifth of the time you spend speaking. Set `transcription-streaming : off` to transcribe only at stop.
 
 The server logs to `xhisper --log` (lines tagged `server:`) and listens on a socket in `$XDG_RUNTIME_DIR/xhisper/` that only your user can reach. After upgrading xhisper, stop the old server with `xhisper_transcribe --stop-server`, or wait for it to time out.
 

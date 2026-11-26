@@ -37,7 +37,7 @@ ollama pull gemma3:4b
 
 1. **xhispertoold** (C daemon) - Virtual keyboard via Linux uinput, listens on abstract Unix socket `@xhisper_socket`
 2. **xhispertool** (C client) - Communicates with daemon via socket; symlinked as `xhispertoold` for daemon mode
-3. **xhisper_transcribe.py** (Python) - Transcription via faster-whisper (whisper engine) or onnx-asr (parakeet engine, default); `--engine` dispatch. For parakeet it can also run as a transcription server (`--serve`) that keeps a warmed-up model loaded, on a socket in `$XDG_RUNTIME_DIR/xhisper/`; `--use-server` transcribes through it and falls back to a one-shot run
+3. **xhisper_transcribe.py** (Python) - Transcription via faster-whisper (whisper engine) or onnx-asr (parakeet engine, default); `--engine` dispatch. For parakeet it can also run as a transcription server (`--serve`) that keeps a warmed-up model loaded, on a socket in `$XDG_RUNTIME_DIR/xhisper/`; `--use-server` transcribes through it and falls back to a one-shot run. With `--watch`, the server streams a recording: it follows the WAV while pw-record writes it and transcribes at pauses, cutting only at sentence ends two passes agree on (none before 20s), so less is left at stop
 4. **xhisper_ime.py** (Python) - IBus input method for `insert-method: ibus`. `--serve` runs a service (PyGObject; started under the system Python since the xhisper venv usually lacks `gi`) that registers a pass-through engine at runtime, activates it only during a dictation, shows statuses as preedit and commits the final text in one go; socket in `$XDG_RUNTIME_DIR/xhisper/`. The client commands (`begin`/`status`/`finish`/`end`) need only the standard library
 5. **xhisper.sh** (Bash) - Main orchestrator: recording, transcription, AI formatting, typing
 
@@ -46,8 +46,9 @@ ollama pull gemma3:4b
 ```
 User presses hotkey → xhisper.sh toggles recording state
   ├─ First press: start the transcription server if not running (parakeet,
-  │  transcription-server on) and preload the Ollama model post-processing
-  │  will likely use → pw-record starts → types "(recording...)"
+  │  transcription-server on), have it follow the recording (transcription-
+  │  streaming on), and preload the Ollama model post-processing will
+  │  likely use → pw-record starts → types "(recording...)"
   │  (insert-method ibus: shows it as preedit instead, unless no IBus
   │  text field has focus)
   └─ Second press: kill pw-record → check silence
@@ -82,6 +83,7 @@ Key settings:
 - `parakeet-model`: onnx-asr model (nemo-parakeet-tdt-0.6b-v2 = English, v3 = multilingual)
 - `transcription-server`: on (default) or off — keep the parakeet model loaded between dictations; started at record time, falls back to one-shot
 - `transcription-server-idle`: minutes without a dictation before the server exits (default 5; 0 = never)
+- `transcription-streaming`: on (default) or off — the server transcribes at pauses during recording, so long dictations have little left at stop; needs the server
 - `model-name`: Whisper size (tiny, base, small, medium, large-v3) — whisper engine only
 - `model-device`: auto, cpu, or cuda — whisper always; parakeet stays on CPU for auto/cpu and uses the GPU for cuda via onnxruntime-gpu (pin `==1.24.4`, the last CUDA 12 build; wheels ≥ 1.26 need CUDA 13), plus `nvidia-curand-cu12 nvidia-cufft-cu12`
 - `transcription-corrections`: comma-separated from=to phrase map applied to raw transcriptions (ASR mishear fixups, e.g. `clawed code=Claude Code,clawed=Claude`); case-insensitive whole-phrase, longest source first
