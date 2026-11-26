@@ -479,6 +479,11 @@ ollama_run() {
   echo "${PIPESTATUS[1]}" > "$status_file"
 }
 
+# Did ollama_run's status come from timeout? (124 = SIGTERM, 137 = SIGKILL)
+is_timeout_status() {
+  [ "$1" -eq 124 ] || [ "$1" -eq 137 ]
+}
+
 post_process() {
   local text="$1"
   local mode="${2:-$post_process_mode}"
@@ -544,13 +549,17 @@ post_process() {
   ollama_run "$model" "$prompt" "$result_file" "$status_file"
 
   # First use of the cleanup alias: a plain run fails with "model not found"
-  # — create the tuned alias from the base pull once and retry.
-  if [ "$(cat "$status_file")" -ne 0 ] && [ "$mode" = "standard/cleanup" ] && ensure_cleanup_model; then
-    ollama_run "$model" "$prompt" "$result_file" "$status_file"
-  fi
-  result=$(<"$result_file")
+  # — create the tuned alias from the base pull once and retry. Never after
+  # a timeout: the model was found, and a retry would make the user wait out
+  # post-process-timeout a second time before getting the raw text.
   local status
   status=$(<"$status_file")
+  if [ "$status" -ne 0 ] && ! is_timeout_status "$status" && \
+     [ "$mode" = "standard/cleanup" ] && ensure_cleanup_model; then
+    ollama_run "$model" "$prompt" "$result_file" "$status_file"
+    status=$(<"$status_file")
+  fi
+  result=$(<"$result_file")
   rm -f "$result_file" "$status_file"
 
   # Timeout (124 = SIGTERM, 137 = SIGKILL) or ollama crash: never paste
@@ -558,7 +567,7 @@ post_process() {
   # pipe, which would truncate the middle of the text.
   if [ "$status" -ne 0 ]; then
     echo "Warning: post-process failed (exit $status after ${post_process_timeout}s, mode=$mode); keeping original transcription" >> "$LOGFILE"
-    [ "$mode" = "standard/cleanup" ] && \
+    [ "$mode" = "standard/cleanup" ] && ! is_timeout_status "$status" && \
       echo "Hint: run 'ollama pull $CLEANUP_MODEL_BASE' to use the cleanup model" >> "$LOGFILE"
     logging_end_and_write_to_logfile "Post-Process [$mode] FAILED (exit $status)" "$text" "$logging_start"
     echo "$text"
