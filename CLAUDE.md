@@ -37,18 +37,20 @@ ollama pull gemma3:4b
 
 1. **xhispertoold** (C daemon) - Virtual keyboard via Linux uinput, listens on abstract Unix socket `@xhisper_socket`
 2. **xhispertool** (C client) - Communicates with daemon via socket; symlinked as `xhispertoold` for daemon mode
-3. **xhisper_transcribe.py** (Python) - Transcription via faster-whisper (whisper engine) or onnx-asr (parakeet engine, default); `--engine` dispatch
+3. **xhisper_transcribe.py** (Python) - Transcription via faster-whisper (whisper engine) or onnx-asr (parakeet engine, default); `--engine` dispatch. For parakeet it can also run as a transcription server (`--serve`) that keeps a warmed-up model loaded, on a socket in `$XDG_RUNTIME_DIR/xhisper/`; `--use-server` transcribes through it and falls back to a one-shot run
 4. **xhisper.sh** (Bash) - Main orchestrator: recording, transcription, AI formatting, typing
 
 ### Data Flow
 
 ```
 User presses hotkey → xhisper.sh toggles recording state
-  ├─ First press: pw-record starts → types "(recording...)"
+  ├─ First press: start the transcription server if not running (parakeet,
+  │  transcription-server on) → pw-record starts → types "(recording...)"
   └─ Second press: kill pw-record → check silence
       ├─ Silent: type "(no sound detected)", exit
       └─ Not silent:
-          ├─ transcribe via parakeet (default) or faster-whisper
+          ├─ transcribe via parakeet (default; through the server when on)
+          │  or faster-whisper
           ├─ standard text: cleanup model if cleanup-model set (native
           │  "text:..." prompt; the tuned alias appends the "\nout:" marker),
           │  else instruct LLM per post-process-standard
@@ -70,6 +72,8 @@ Location: `~/.config/xhisper/xhisperrc` (or `$XDG_CONFIG_HOME/xhisper/xhisperrc`
 Key settings:
 - `transcription-engine`: parakeet (default) or whisper
 - `parakeet-model`: onnx-asr model (nemo-parakeet-tdt-0.6b-v2 = English, v3 = multilingual)
+- `transcription-server`: on (default) or off — keep the parakeet model loaded between dictations; started at record time, falls back to one-shot
+- `transcription-server-idle`: minutes without a dictation before the server exits (default 5; 0 = never)
 - `model-name`: Whisper size (tiny, base, small, medium, large-v3) — whisper engine only
 - `model-device`: auto, cpu, or cuda — whisper always; parakeet stays on CPU for auto/cpu and uses the GPU for cuda via onnxruntime-gpu (pin `==1.24.4`, the last CUDA 12 build; wheels ≥ 1.26 need CUDA 13), plus `nvidia-curand-cu12 nvidia-cufft-cu12`
 - `transcription-corrections`: comma-separated from=to phrase map applied to raw transcriptions (ASR mishear fixups, e.g. `clawed code=Claude Code,clawed=Claude`); case-insensitive whole-phrase, longest source first

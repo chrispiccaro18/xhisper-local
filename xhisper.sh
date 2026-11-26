@@ -17,6 +17,12 @@ export LD_LIBRARY_PATH="$NV_LIBS:$LD_LIBRARY_PATH"
 # Configuration (see default_xhisperrc or ~/.config/xhisper/xhisperrc):
 # - transcription-engine : parakeet or whisper (default parakeet)
 # - parakeet-model : onnx-asr model for the parakeet engine
+# - transcription-server : on or off (default on, parakeet only). Keeps the
+#   model loaded and warmed up between dictations (~1s instead of ~5s per
+#   transcription on a laptop CPU); started when recording begins so the load
+#   overlaps with speaking. Falls back to a one-shot run if unavailable.
+# - transcription-server-idle : minutes without a dictation before the server
+#   exits and frees the model's ~2.5GB (default 5; 0 = never)
 # - model-name : Whisper model size (tiny, base, small, medium, large-v3)
 # - model-device : Device to use (auto, cpu, cuda). whisper: auto detects
 #   CUDA. parakeet: auto/cpu run on CPU (default, fast); cuda runs on the
@@ -104,6 +110,8 @@ PROCESS_PATTERN="pw-record.*$RECORDING"
 # Default configuration
 transcription_engine="parakeet"
 parakeet_model="nemo-parakeet-tdt-0.6b-v2"
+transcription_server="on"
+transcription_server_idle=5
 model_name="base"
 model_device="auto"
 model_language=""
@@ -135,6 +143,8 @@ if [ -f "$CONFIG_FILE" ]; then
     case "$key" in
       transcription-engine) transcription_engine="$value" ;;
       parakeet-model) parakeet_model="$value" ;;
+      transcription-server) transcription_server="$value" ;;
+      transcription-server-idle) transcription_server_idle="$value" ;;
       model-name) model_name="$value" ;;
       model-device) model_device="$value" ;;
       model-language) model_language="$value" ;;
@@ -514,6 +524,12 @@ post_process() {
   fi
 }
 
+# The transcription server keeps the parakeet model loaded between
+# dictations — see the server section of xhisper_transcribe.py
+use_transcription_server() {
+  [ "$transcription_engine" = "parakeet" ] && [ "$transcription_server" = "on" ]
+}
+
 transcribe() {
   local recording="$1"
   local logging_start=$(date +%s%N)
@@ -526,6 +542,7 @@ transcribe() {
     # device: auto/cpu stay on CPU (pinned providers); cuda opts into the
     # GPU via onnxruntime-gpu — see xhisper_transcribe.py
     cmd_args+=(--parakeet-model "$parakeet_model" --device "$model_device")
+    use_transcription_server && cmd_args+=(--use-server)
   else
     cmd_args+=(--model "$model_name" --device "$model_device" --vad-min-silence-ms "$vad_min_silence_ms")
     [ -n "$model_language" ] && cmd_args+=(--language "$model_language")
@@ -604,6 +621,15 @@ if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
   rm -f "$RECORDING"
 else
   # No recording running, so start
+
+  # Load the transcription model while the user speaks, so it is ready (or
+  # nearly) when recording stops; a no-op if the server is already up
+  if use_transcription_server; then
+    python3 "$TRANSCRIPT_SCRIPT" --start-server --parakeet-model "$parakeet_model" \
+      --device "$model_device" --idle-minutes "$transcription_server_idle" \
+      --log-file "$LOGFILE" 2>>"$LOGFILE" &
+  fi
+
   sleep 0.2
   type_text "(recording...)"
   pw-record --channels=1 --rate=16000 "$RECORDING"

@@ -16,6 +16,17 @@ transcription-engine : parakeet
 # - nemo-parakeet-tdt-0.6b-v3 : multilingual (25 languages, auto-detects)
 parakeet-model : nemo-parakeet-tdt-0.6b-v2
 
+# Transcription server (parakeet engine only):
+# Loading the model and warming up ONNX Runtime costs ~5s per dictation on a
+# laptop CPU, for under 1s of actual recognition. With the server on, the
+# model stays loaded between dictations: ~1s instead of ~5s. It starts when
+# recording begins, so the first load overlaps with you speaking, and exits
+# after transcription-server-idle minutes without a dictation, freeing its
+# ~2.5GB of RAM (0 = never). If the server is unavailable for any reason,
+# xhisper falls back to the one-shot path.
+transcription-server      : on
+transcription-server-idle : 5
+
 # Whisper Model Settings (whisper engine only):
 # Available models: tiny, base, small, medium, large-v3
 # - tiny: fastest, least accurate (~1GB RAM)

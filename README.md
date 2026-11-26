@@ -11,6 +11,7 @@ Dictation at cursor for Linux. Now with **local transcription** (Parakeet/Whispe
 ## Features
 
 - 🎤 **Parakeet-first local transcription** — NVIDIA TDT 0.6B via onnx-asr: ~2x more accurate than whisper-base in English, punctuation & capitalization built in, fast on CPU (whisper remains a config-switch away)
+- 🔥 **Model stays warm** — a background transcription server keeps Parakeet loaded between dictations (~5s → ~1s per transcription on a laptop CPU), loading while you speak and freeing its RAM after 5 idle minutes
 - 🧹 **Fast dictation cleanup** — optional [Spokenly cleanup-1](https://huggingface.co/spokenly/cleanup-1) pass (0.6B, ~0.1-0.3s) strips filler words, applies spoken corrections ("send it to Bob wait no Alice"), formats numbers, email and web addresses
 - ⚡ **No heavyweight LLM for everyday dictation** — the 0.6B cleanup model handles standard text; a bigger Ollama model is only used for command and email modes
 - 🧠 **AI-powered formatting** via local LLM (Ollama) for grammar, punctuation, and context-aware correction
@@ -181,10 +182,22 @@ Configuration is read from `~/.config/xhisper/xhisperrc`:
 |---------|-------------|-------------|
 | `transcription-engine` | `parakeet` or `whisper` | `parakeet` (default) |
 | `parakeet-model` | onnx-asr model name | `nemo-parakeet-tdt-0.6b-v2` |
+| `transcription-server` | Keep the parakeet model loaded between dictations (`on`/`off`) | `on` (default) |
+| `transcription-server-idle` | Minutes without a dictation before the server frees the model; `0` = never | `5` (default) |
 
 **Why Parakeet?** It's ~2x more accurate than whisper-base in English and outputs punctuated, capitalized text natively — so standard dictation skips the LLM formatting pass entirely (faster, no Gemma spin-up). Gemma is still used for `command` and `email` modes. Long recordings (>25s) are automatically segmented with Silero VAD so nothing after a thinking pause is lost. First use downloads ~1GB to `~/.cache/xhisper/parakeet`.
 
 **Parakeet models:** `nemo-parakeet-tdt-0.6b-v2` (English, best accuracy), `nemo-parakeet-tdt-0.6b-v3` (25 languages, auto-detects)
+
+**Transcription server:** loading Parakeet and ONNX Runtime's slow first run cost ~5s per dictation, for under 1s of actual recognition. With `transcription-server : on` (the default), a background process keeps the model loaded and warmed up between dictations. It starts when you begin recording, so the first load overlaps with you speaking, and exits after `transcription-server-idle` minutes (default 5) without a dictation, freeing its ~2.5GB of RAM. If it is unavailable for any reason, xhisper falls back to the one-shot path. Measured on an Intel i5-12500H laptop (CPU only), from the second keypress to typed text with cleanup-1:
+
+| | One-shot | Server |
+|---|---|---|
+| Server already loaded | 6.6s | 1.7s |
+| First dictation, 7s of speaking | 6.6s | 2.6s |
+| First dictation, 1.5s of speaking | 6.6s | 6.1s |
+
+The server logs to `xhisper --log` (lines tagged `server:`) and listens on a socket in `$XDG_RUNTIME_DIR/xhisper/` that only your user can reach. After upgrading xhisper, stop the old server with `xhisper_transcribe --stop-server`, or wait for it to time out.
 
 **Fixing misheard words (`transcription-corrections`):** the ASR engines have no vocabulary biasing, so homophones get transcribed literally — e.g. "Claude" comes out as "clawed". A comma-separated `from=to` map fixes known mishears right after transcription, before cleanup runs:
 ```sh
