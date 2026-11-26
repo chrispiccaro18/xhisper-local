@@ -267,6 +267,7 @@ That's it — from the next dictation on, standard text goes through it (`post-p
 
 **Requirements and limits:**
 - Ollama running locally; 639 MB disk, ~0.7-1.1 GB RAM while loaded
+- xhisper loads the model when you start recording, so Ollama's 5-minute idle unload doesn't add ~1s to your next dictation (the same goes for `post-process-model` in `--mode=command`/`email`)
 - Runs on CPU (~0.3s per sentence, needs AVX2 — any x86-64 CPU from ~2014 on) or GPU (~0.1s)
 - Fully offline after the one-time download; Apache-2.0 licensed
 - English is best; German, Spanish, French, Chinese, Russian and Japanese work at lower quality — if you dictate mainly in another language (e.g. with the multilingual `nemo-parakeet-tdt-0.6b-v3`), test before relying on it

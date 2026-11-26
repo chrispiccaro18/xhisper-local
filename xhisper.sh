@@ -537,6 +537,29 @@ post_process() {
   fi
 }
 
+# Load the Ollama model the post-processing pass will most likely use, while
+# the user speaks: Ollama unloads idle models after 5 minutes by default,
+# and reloading costs ~1s (cleanup-1) when recording stops. Auto mode bets on
+# standard text, which most dictations are. Only loads installed models —
+# `ollama run` would otherwise start downloading a missing one.
+preload_post_process_model() {
+  local mode="$post_process_mode" model
+  [ "$mode" = "auto" ] && mode="standard"
+  formatting_applies "$mode" || return 0
+  skip_standard_formatting "$mode" && return 0
+  command -v ollama &> /dev/null || return 0
+
+  if [ "$mode" = "standard" ] && [ -n "$cleanup_model" ]; then
+    model="$cleanup_model"
+    ensure_cleanup_model || return 0  # creates the tuned alias on first use
+  else
+    model="$post_process_model"
+    ollama show "$model" &> /dev/null || return 0
+  fi
+  # An empty prompt loads the model without generating anything
+  ollama run "$model" "" < /dev/null &> /dev/null
+}
+
 # The transcription server keeps the parakeet model loaded between
 # dictations — see the server section of xhisper_transcribe.py
 use_transcription_server() {
@@ -698,6 +721,7 @@ else
       --device "$model_device" --idle-minutes "$transcription_server_idle" \
       --log-file "$LOGFILE" 2>>"$LOGFILE" &
   fi
+  preload_post_process_model &
 
   wait_for_key_release
   type_text "(recording...)"

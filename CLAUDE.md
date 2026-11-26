@@ -45,7 +45,8 @@ ollama pull gemma3:4b
 ```
 User presses hotkey → xhisper.sh toggles recording state
   ├─ First press: start the transcription server if not running (parakeet,
-  │  transcription-server on) → pw-record starts → types "(recording...)"
+  │  transcription-server on) and preload the Ollama model post-processing
+  │  will likely use → pw-record starts → types "(recording...)"
   └─ Second press: kill pw-record → check silence
       ├─ Silent: type "(no sound detected)", exit
       └─ Not silent:
