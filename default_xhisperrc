@@ -92,6 +92,17 @@ silence-percentage : 95
 #     sudo dnf install python3-gobject ibus-libs     (Fedora)
 insert-method : type
 
+# Smart insertion (insert-method ibus only): fit the dictation to the text
+# around the cursor, which the focused field reports to IBus. Adds a space
+# when you dictate right after a word; lowercases the first word when you
+# continue a sentence (only common words like "and", "the", "so": names,
+# "I" and acronyms keep their capitals); drops the final period before
+# lowercase words that follow; adds a space before a word right after the
+# cursor. Fields that don't report it (terminals, Chrome) are unchanged.
+# With IBus < 1.5.28 the fix can come a few ms after inserting (undo then
+# takes two steps).
+smart-insert : on
+
 # AI Post-Processing (optional):
 # Improve grammar, punctuation, and capitalization using local models via
 # Ollama — a fast dedicated cleanup model for standard text, and/or an

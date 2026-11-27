@@ -45,6 +45,10 @@ SCRIPT_START_US=$(date +%s%6N)
 #   status messages shown as preedit text that never enters the document;
 #   falls back to typing where no IBus text field has focus. See
 #   xhisper_ime.py.
+# - smart-insert : on (default) or off, insert-method ibus only. Fits the
+#   dictation to the text around the cursor: a leading space after a word,
+#   a lowercase first word mid-sentence (common words only, never names),
+#   no period before the words that follow.
 # Note: model-language, transcription-prompt, and vad-min-silence-ms apply to
 # the whisper engine only; parakeet v2 is English-only, v3 auto-detects.
 
@@ -131,6 +135,7 @@ post_process_timeout=10
 post_process_mode="auto"
 post_process_standard="auto"
 insert_method="type"
+smart_insert="on"
 
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/xhisper/xhisperrc"
 
@@ -171,6 +176,7 @@ if [ -f "$CONFIG_FILE" ]; then
       post-process-mode) post_process_mode="$value" ;;
       post-process-standard) post_process_standard="$value" ;;
       insert-method) insert_method="$value" ;;
+      smart-insert) smart_insert="$value" ;;
     esac
   done < "$CONFIG_FILE"
 fi
@@ -678,7 +684,7 @@ ime_client() {
 # no hotkey modifiers to wait for
 ime_status() {
   audit "PREEDIT [$1]"
-  ime_client status "$1"
+  ime_client status -- "$1"
 }
 
 # Insert the final text at the cursor. With the input method, commit it as
@@ -688,7 +694,9 @@ ime_status() {
 insert_text() {
   local text="$1"
   if use_ime; then
-    ime_client finish "$text"
+    local -a fit=()
+    [ "$smart_insert" = "off" ] && fit=(--no-fit)
+    ime_client finish "${fit[@]}" -- "$text"
     case $? in
       0) audit "COMMIT [${text:0:70}]"; return ;;
       5) audit "COMMIT outcome unknown; not typing it again: [${text:0:70}]"; return ;;
@@ -822,7 +830,7 @@ else
     # speech must not wait for that
     pw-record --channels=1 --rate=16000 "$RECORDING" &
     record_pid=$!
-    if ime_client begin "(recording...)" --log-file "$LOGFILE"; then
+    if ime_client begin --log-file "$LOGFILE" -- "(recording...)"; then
       STATUS_MODE="ime"
       audit "PREEDIT [(recording...)]"
     else

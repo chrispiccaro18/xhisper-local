@@ -29,7 +29,8 @@ library, the service needs PyGObject with the IBus typelib):
                    show statuses; 3: no IBus text field has focus (type
                    instead); 4: service unavailable
   status STATUS    replace the preedit status (best effort)
-  finish TEXT      commit TEXT, then restore the previous engine. Exit 0:
+  finish TEXT      commit TEXT (fitted to the text around the cursor
+                   unless --no-fit), then restore the previous engine. Exit 0:
                    committed; 3: no IBus text field has focus, type it;
                    4: service unavailable, type it; 5: outcome unknown (the
                    reply was lost), do not type it again
@@ -37,6 +38,9 @@ library, the service needs PyGObject with the IBus typelib):
   probe            print the focus state as JSON (diagnostics)
   --serve          run the service in the foreground
   --stop-server    stop the running service
+
+Put -- before a text argument so a dictation that looks like an option
+stays text.
 
 Protocol: one JSON line per connection, one JSON line back.
 """
@@ -77,6 +81,8 @@ FAKE_CONTEXT_PATH = "/org/freedesktop/IBus/InputContext_1"
 FAKE_CLIENT = "fake"
 
 FOCUS_WAIT_S = 0.5      # activation until the engine is attached to the focused field
+SURROUNDING_FRESH_WAIT_S = 0.04  # an answer to asking for the text around the cursor
+SURROUNDING_WAIT_S = 0.15  # the update a field sends after a commit
 START_WAIT_S = 5.0      # service start until its socket answers
 REQUEST_LIMIT = 1024 * 1024
 
@@ -140,6 +146,98 @@ def log(message: str):
 
 
 # ---------------------------------------------------------------------------
+# Fitting a dictation to the text around the cursor (smart insertion)
+#
+# The transcription is punctuated as if it were a whole text: it starts with
+# a capital and ends with a period. Inserted after a word or mid-sentence it
+# needs a leading space, often a lowercase first word, and no period before
+# the words that follow. The focused field reports the text around the
+# cursor (IBus surrounding text), which says which case applies.
+
+_OPENERS = "([{“‘«"
+_CLOSERS = "\"'”’)]}»"
+_SENTENCE_ENDS = ".!?…"
+_NO_SPACE_BEFORE = ",.;:!?)]}…%"
+
+# First words lowercased when a dictation continues a sentence. Only common
+# words that are not names; anything else (a name, "I", an acronym) keeps
+# its capital, since Parakeet can't be asked which it is. Ambiguous words
+# such as "May", "Will" or "March" are left out on purpose.
+_LOWERCASE_MID_SENTENCE = frozenset("""
+a an the and but or nor so yet for then also plus because although though
+while if unless until since whereas whether as than like which that who
+whom whose what when where why how there here this these those it its
+it's that's there's here's what's who's let's we you he she they them us
+him her me my your our their his we're you're they're we've you've
+they've we'll you'll they'll it'll he's she's is are was were be been
+being am do does did don't doesn't didn't isn't aren't wasn't weren't
+can't won't wouldn't couldn't shouldn't have has had would could should
+might must can to of in on at by with from about into onto over under
+after before without within through between around against during
+toward towards just maybe probably really actually now not still even
+only too very some any all each every both either neither more most much
+many such no yes okay ok well anyway though instead otherwise however
+""".split())
+
+
+def _first_word(text: str):
+    """(start, end) of the first word of text, past opening quotes."""
+    m = re.search(r"[^\W\d_][\w'’-]*", text)
+    return (m.start(), m.end()) if m else None
+
+
+def fit_to_context(text: str, before: str, after: str) -> str:
+    """
+    Adjust a dictation to the text before and after the cursor: spacing,
+    the case of its first word, and its final period. Text it can't judge
+    (an empty dictation, no letters) is returned unchanged.
+    """
+    if not text.strip():
+        return text
+    text = text.strip()
+
+    # Where the cursor is: the start of a line or sentence, or mid-sentence
+    trimmed = before.rstrip(" \t")
+    core = trimmed.rstrip(_CLOSERS)
+    sentence_start = (not trimmed or trimmed.endswith("\n")
+                      or (core[-1:] in _SENTENCE_ENDS if core else True))
+
+    # Leading space: after a word or closing punctuation, not after a space,
+    # a line start or an opening bracket/quote
+    last = before[-1:]
+    if last and not last.isspace() and text[0] not in _NO_SPACE_BEFORE:
+        opening_quote = last in "\"'" and (len(before) == 1 or before[-2].isspace()
+                                            or before[-2] in _OPENERS)
+        if last not in _OPENERS and not opening_quote:
+            text = " " + text
+
+    # Case of the first word
+    word = _first_word(text)
+    if word:
+        s, e = word
+        first = text[s:e]
+        if sentence_start:
+            if first[0].islower():
+                text = text[:s] + first[0].upper() + text[s + 1:]
+        elif (first[0].isupper() and first[1:] == first[1:].lower()
+              and first.lower().replace("’", "'") in _LOWERCASE_MID_SENTENCE):
+            text = text[:s] + first[0].lower() + text[s + 1:]
+
+    # The end: the words after the cursor decide whether the dictation ends
+    # a sentence there
+    nxt = after[:1]
+    following = after.lstrip(" \t")
+    continues = bool(following) and following[0].islower()
+    if nxt and nxt in ",.;:!?":  # ("" is "in" every string)
+        text = re.sub(r"(?<![.!?…])[.,;:!?]$", "", text)  # no "word.," / "word.."
+    elif continues:
+        text = re.sub(r"(?<![.!?…])\.$", "", text)  # mid-sentence: no period
+    if nxt and (nxt.isalnum() or nxt in _OPENERS):
+        text = text + " "
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Service (runs under a Python that has PyGObject; see service_python())
 
 def _make_engine_class(IBus, service):
@@ -167,6 +265,9 @@ def _make_engine_class(IBus, service):
 
         def do_set_content_type(self, purpose, hints):
             service.content_type(self, purpose, hints)
+
+        def do_set_capabilities(self, caps):
+            service.caps = caps
 
     return XhisperEngine
 
@@ -230,6 +331,13 @@ class ImeService:
         self.path = None      # focus-in-id context path (IBus >= 1.5.27)
         self.purpose = None   # IBus.InputPurpose of the focused field
         self.status = None    # preedit status, re-shown when focus moves
+        self.caps = 0         # IBus.Capabilite flags of the focused field
+        self.surrounding = None  # (text, cursor, anchor) around the cursor
+        self.surrounding_updates = 0
+        self.updates_at_commit = 0
+        # Fields that sent no surrounding text even after a commit (Chrome,
+        # for one), by context path: don't make every dictation wait for them
+        self.silent_fields = set()
         self.active = False
         self.last_request = time.monotonic()
         self.loop = GLib.MainLoop()
@@ -247,6 +355,7 @@ class ImeService:
             props["has_focus_id"] = True
         engine = self.Engine(**props)
         engine.connect("destroy", self._engine_destroyed)
+        engine.connect("set-surrounding-text", self._surrounding_text)
         self.engines.add(engine)  # keep the Python wrapper alive with the engine
         return engine
 
@@ -266,12 +375,52 @@ class ImeService:
 
     def focus_in(self, engine, path, client):
         self.engine, self.path, self.client = engine, path, client
+        self.surrounding = None  # belongs to the previous field
         if self.status is not None:
             self._show_status()  # follow the user to the newly focused field
 
     def focus_out(self, engine):
         if engine is self.engine:
             self.engine = self.path = self.client = self.purpose = None
+            self.surrounding = None
+
+    def _surrounding_text(self, engine, text, cursor_pos, anchor_pos):
+        self.surrounding = (text.get_text(), cursor_pos, anchor_pos)
+        self.surrounding_updates += 1
+
+    def request_surrounding(self):
+        """
+        Ask the focused field for the text around the cursor. Returns the
+        update count to wait past, or None if no answer can be expected.
+
+        Clients of IBus >= 1.5.28 answer at once. Older ones send it only at
+        their own trigger points, and only if it changed since they last
+        computed it, even for another engine (ibus_input_context_set_
+        surrounding_text compares with its cache): right after the user
+        typed, they send nothing. A commit always changes it, which is what
+        finish falls back on (fit_after_commit).
+        """
+        if not self.is_real_focus() or not self.caps & self.IBus.Capabilite.SURROUNDING_TEXT:
+            return None
+        if self.purpose == self.IBus.InputPurpose.TERMINAL:
+            return None  # terminals advertise it but never answer
+        if self._field() in self.silent_fields:
+            return None
+        self.engine.get_surrounding_text()  # emits RequireSurroundingText
+        # That only flags the field (IBus 1.5.26 GTK module): it sends the text
+        # at its own trigger points, such as key presses, commits, and preedit
+        # going from hidden to shown (_ibus_context_show_preedit_text_cb). The
+        # last is one the engine can cause. The preedit is cleared at commit.
+        self.engine.hide_preedit_text()
+        self.engine.show_preedit_text()
+        return self.surrounding_updates
+
+    def _field(self):
+        """The focused input context's path: identifies the field."""
+        try:
+            return self.path or self.bus.current_input_context()
+        except Exception:
+            return None
 
     def content_type(self, engine, purpose, hints):
         # Stored whatever its order relative to focus-in: only the engine
@@ -356,17 +505,46 @@ class ImeService:
             self.engine.update_preedit_text_with_mode(
                 self.IBus.Text.new_from_string(""), 0, False, self.IBus.PreeditFocusMode.CLEAR)
 
-    def commit(self, text: str) -> bool:
+    def commit(self, text: str, fit: bool = False, context: str = None):
+        """Commit text, fitted to fresh surrounding text if fit; the text committed, or None."""
         if not self.is_real_focus():
-            return False
+            return None
         self.status = None
         self._clear_status()
         if self.purpose == self.IBus.InputPurpose.TERMINAL:
             # A committed newline is Enter in a terminal: it would run the
             # command line. Join lines with spaces instead.
             text = re.sub(r"[ \t]*\r?\n\s*", " ", text).strip()
+        if fit and self.surrounding is not None:
+            around, cursor, anchor = self.surrounding
+            start, end = sorted((cursor, anchor))  # a selection gets replaced
+            fitted = fit_to_context(text, around[:start], around[end:])
+            if fitted != text:
+                log(f"fitted to the text around the cursor ({context}): {text!r} -> {fitted!r}")
+                text = fitted
+        self.updates_at_commit = self.surrounding_updates
         self.engine.commit_text(self.IBus.Text.new_from_string(text))
-        return True
+        return text
+
+    def fit_after_commit(self, committed: str):
+        """
+        Fit a dictation already committed as is, using the surrounding text
+        the field sent after the commit: delete it and commit the fitted
+        version. Only if that text shows the dictation right before the
+        cursor; otherwise (a multi-line dictation, an app that edits what it
+        receives) it stays as is.
+        """
+        around, cursor, anchor = self.surrounding
+        n = len(committed)
+        if cursor != anchor or cursor < n or around[cursor - n:cursor] != committed:
+            log("the text around the cursor doesn't end with the dictation; left as is")
+            return
+        fitted = fit_to_context(committed, around[:cursor - n], around[cursor:])
+        if fitted == committed:
+            return
+        self.engine.delete_surrounding_text(-n, n)
+        self.engine.commit_text(self.IBus.Text.new_from_string(fitted))
+        log(f"fitted to the text around the cursor (after inserting): {committed!r} -> {fitted!r}")
 
     def _load_prev_engine(self):
         try:
@@ -404,6 +582,15 @@ class ImeService:
             raise box["error"]
         return box.get("value")
 
+    def _wait_surrounding(self, seen: int, timeout_s: float):
+        """Wait for a surrounding-text update past count seen: ms it took, or None."""
+        start = time.monotonic()
+        while self.on_main(lambda: self.surrounding_updates) == seen:
+            if time.monotonic() - start > timeout_s:
+                return None
+            time.sleep(0.005)
+        return (time.monotonic() - start) * 1000
+
     def _activate_and_wait(self):
         self.on_main(self.activate)
         deadline = time.monotonic() + FOCUS_WAIT_S
@@ -431,10 +618,30 @@ class ImeService:
             return {"ok": True, "shown": self.on_main(lambda: self.set_status(str(request["text"])))}
         if cmd == "finish":
             self._activate_and_wait()
-            committed = self.on_main(lambda: self.commit(str(request["text"])))
+            text = str(request["text"])
+            fit = bool(request.get("fit", True))
+            # Ask the field for the text around the cursor. IBus >= 1.5.28
+            # clients answer at once; older ones only when it changed since
+            # they last computed it, and a cached copy may be stale, so only
+            # a fresh answer counts.
+            seen = self.on_main(self.request_surrounding) if fit else None
+            fresh = self._wait_surrounding(seen, SURROUNDING_FRESH_WAIT_S) if seen is not None else None
+            context = None if fresh is None else f"answered in {fresh:.0f}ms"
+            committed = self.on_main(lambda: self.commit(text, fresh is not None, context))
+            if committed is not None and seen is not None and fresh is None:
+                # No fresh answer: after a commit the field's text has
+                # changed, so even older clients send it. Fit from that.
+                after = self.on_main(lambda: self.updates_at_commit)
+                if self._wait_surrounding(after, SURROUNDING_WAIT_S) is not None:
+                    self.on_main(lambda: self.fit_after_commit(committed))
+                else:
+                    field = self.on_main(self._field)
+                    self.on_main(lambda: self.silent_fields.add(field))
+                    log(f"no surrounding text from the focused field ({field}) within "
+                        f"{SURROUNDING_WAIT_S * 1000:.0f}ms; inserted as is, and won't ask it again")
             info = self.on_main(self.focus_info)
             self.on_main(self.deactivate)
-            return {"ok": True, "committed": committed, **info}
+            return {"ok": True, "committed": committed is not None, "context": context, **info}
         if cmd == "end":
             self.on_main(self.deactivate)
             return {"ok": True}
@@ -677,16 +884,22 @@ def main(argv) -> int:
         return EXIT_ERROR
     cmd, args = argv[1], argv[2:]
 
-    idle_minutes, log_file = DEFAULT_IDLE_MINUTES, None
+    idle_minutes, log_file, fit = DEFAULT_IDLE_MINUTES, None, True
     rest = []
     i = 0
     while i < len(args):
+        if args[i] == "--":  # the rest is text, even if it looks like an option
+            rest += args[i + 1:]
+            break
         if args[i] == "--idle-minutes" and i + 1 < len(args):
             idle_minutes = float(args[i + 1])
             i += 2
         elif args[i] == "--log-file" and i + 1 < len(args):
             log_file = args[i + 1]
             i += 2
+        elif args[i] == "--no-fit":
+            fit = False
+            i += 1
         else:
             rest.append(args[i])
             i += 1
@@ -716,7 +929,7 @@ def main(argv) -> int:
             call({"cmd": "status", "text": text}, timeout_s=2)
             return EXIT_OK
         if cmd == "finish":
-            reply = call({"cmd": "finish", "text": text}, timeout_s=5)
+            reply = call({"cmd": "finish", "text": text, "fit": fit}, timeout_s=5)
             if not reply.get("ok"):
                 log(f"finish failed: {reply.get('error')}; typing instead")
                 return EXIT_UNAVAILABLE

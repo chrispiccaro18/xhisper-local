@@ -287,6 +287,10 @@ That's it — from the next dictation on, standard text goes through it (`post-p
 - xhisper switches to its own input method only while a dictation runs, then restores yours. It passes every key through, so typing during a dictation works as usual.
 - Where no IBus text field has focus (the desktop, or apps without IBus support such as the VS Code snap, which ships without GTK's IBus module), xhisper notices and types instead.
 
+`smart-insert` (default `on`, `ibus` only) fits the dictation to the text around the cursor, which the focused field reports to IBus. Parakeet punctuates every dictation as a whole text, with a capital first word and a final period. So dictating `and then we left` after `I went to the store` gives ` and then we left.` instead of `And then we left.` glued to the previous word. Inserted before lowercase words, it drops the period. Only common words (`and`, `the`, `so`…) are lowercased: names, `I` and acronyms keep their capitals. Terminals and fields that don't report surrounding text are left as they are.
+
+Where it works: GTK apps such as gedit. Chrome doesn't report surrounding text, so dictations there go in as they are; after the first one, xhisper stops waiting for it. Apps built against IBus older than 1.5.28 (Ubuntu 22.04 and Pop!_OS 22.04 ship 1.5.26) report the text only after something changed. So when you dictate right after typing, xhisper inserts the dictation, reads the text back, and replaces it with the fitted version within a few milliseconds: undo then takes two steps. With newer IBus it fits the text before inserting it.
+
 Requirements: IBus running (the GNOME default) and PyGObject with the IBus typelib, e.g. `sudo apt install python3-gi gir1.2-ibus-1.0` on Debian/Ubuntu/Pop!_OS or `sudo dnf install python3-gobject ibus-libs` on Fedora. The service runs under the system Python, so a virtualenv for onnx-asr doesn't need these. Tested on Pop!_OS 22.04 (GNOME on X11, IBus 1.5.26) in gedit, GNOME Terminal and Chrome, plus the typing fallback in the VS Code snap. On IBus 1.5.27 and later, the focus check uses IBus's documented `focus-in-id` signal; that path is untested.
 
 ### Other Settings

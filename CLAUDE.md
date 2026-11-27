@@ -91,6 +91,7 @@ Key settings:
 - `post-process-mode`: auto, standard, command, email
 - `post-process-timeout`: Max seconds for LLM formatting (on timeout the raw transcription is kept)
 - `insert-method`: type (default; key by key via uinput) or ibus (one IBus commit, statuses as preedit, typing fallback where no IBus text field has focus; needs python3-gi + gir1.2-ibus-1.0)
+- `smart-insert`: on (default) or off, ibus only — `fit_to_context` in xhisper_ime.py adjusts spacing, first-word case and the final period to the IBus surrounding text. At commit it asks the field (RequireSurroundingText plus a hide/show of the preedit, a GTK trigger point) and fits first if a fresh answer comes within 40ms (IBus >= 1.5.28 clients always answer). Older clients send only changed text, so otherwise it commits as is and fits from the update sent after the commit (delete_surrounding_text + commit). Terminals are skipped; fields that never answer (Chrome) are remembered per context path
 
 ## Command Line Options
 
