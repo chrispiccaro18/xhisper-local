@@ -697,12 +697,15 @@ transcribe() {
 
   # Run transcription — stderr goes to the log so failures are diagnosable
   # via 'xhisper --log' instead of silently producing empty output
-  local transcription
+  local transcription status
   transcription=$(python3 "$TRANSCRIPT_SCRIPT" "$recording" "${cmd_args[@]}" 2>>"$LOGFILE")
+  status=$?
 
   logging_end_and_write_to_logfile "Transcription [$transcription_engine]" "$transcription" "$logging_start"
 
   echo "$transcription"
+  # Non-zero if the engine failed; zero with no text if it heard no words
+  return "$status"
 }
 
 # The hotkey's keys (e.g. Alt+Shift+D) are usually still down when this
@@ -861,6 +864,7 @@ if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
     # A preedit status costs no keystrokes: show it right away
     ime_status "(transcribing...)"
     wait "$transcribe_pid"
+    TRANSCRIBE_STATUS=$?
   else
     # Show "(transcribing...)" only if it outlasts a grace period as long as
     # typing and deleting the status takes on screen (~0.3s): for a short
@@ -869,9 +873,11 @@ if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
     delete_n_chars 14 # "(recording...)"
     if exits_within_status_grace "$transcribe_pid"; then
       wait "$transcribe_pid"
+      TRANSCRIBE_STATUS=$?
     else
       type_text "(transcribing...)"
       wait "$transcribe_pid"
+      TRANSCRIBE_STATUS=$?
       delete_n_chars 17 # "(transcribing...)"
     fi
   fi
@@ -886,19 +892,26 @@ if pgrep -f "$PROCESS_PATTERN" > /dev/null; then
     TRANSCRIPTION="$CORRECTED"
   fi
 
-  # Engine failed (e.g. onnx-asr missing, model error) — errors are in the log
+  # No text. Either the engine failed (e.g. onnx-asr missing, model error;
+  # the errors are in the log), or it ran and heard no words: a recording
+  # with a click or background noise passes the silence check above.
   if [ -z "$TRANSCRIPTION" ]; then
+    if [ "$TRANSCRIBE_STATUS" -eq 0 ]; then
+      message="(no speech detected)" shown_for=0.6 exit_code=0
+    else
+      message="(transcription failed - see xhisper --log)" shown_for=1.5 exit_code=1
+    fi
     if [ "$STATUS_MODE" = "ime" ]; then
-      ime_status "(transcription failed - see xhisper --log)"
-      sleep 1.5
+      ime_status "$message"
+      sleep "$shown_for"
       ime_client end
     else
-      type_text "(transcription failed - see xhisper --log)"
-      sleep 1.5
-      delete_n_chars 42 # "(transcription failed - see xhisper --log)"
+      type_text "$message"
+      sleep "$shown_for"
+      delete_n_chars "${#message}"
     fi
     rm -f "$RECORDING"
-    exit 1
+    exit "$exit_code"
   fi
 
   # Post-process with AI if configured. Skip the whole "(formatting...)"
