@@ -18,7 +18,8 @@ SCRIPT_START_US=$(date +%s%6N)
 #   exits and frees the model's ~2.5GB (default 5; 0 = never)
 # - transcription-streaming : on or off (default on, needs the server). The
 #   server transcribes at pauses while you speak, so a long dictation has
-#   little left to transcribe at stop. Dictations under 20s are unaffected.
+#   little left to transcribe at stop. Dictations under 20s are transcribed
+#   whole; if you pause ~1s before stopping, that is already done too.
 # - model-name : Whisper model size (tiny, base, small, medium, large-v3)
 # - model-device : Device to use (auto, cpu, cuda). whisper: auto detects
 #   CUDA. parakeet: auto/cpu run on CPU (default, fast); cuda runs on the

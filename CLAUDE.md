@@ -83,7 +83,7 @@ Key settings:
 - `parakeet-model`: onnx-asr model (nemo-parakeet-tdt-0.6b-v2 = English, v3 = multilingual)
 - `transcription-server`: on (default) or off — keep the parakeet model loaded between dictations; started at record time, falls back to one-shot
 - `transcription-server-idle`: minutes without a dictation before the server exits (default 5; 0 = never)
-- `transcription-streaming`: on (default) or off — the server transcribes at pauses during recording, so long dictations have little left at stop; needs the server
+- `transcription-streaming`: on (default) or off — the server transcribes at pauses during recording, so long dictations have little left at stop, and any dictation that ends with a ~1s pause reuses the latest pass (near-instant); needs the server
 - `model-name`: Whisper size (tiny, base, small, medium, large-v3) — whisper engine only
 - `model-device`: auto, cpu, or cuda — whisper always; parakeet stays on CPU for auto/cpu and uses the GPU for cuda via onnxruntime-gpu (pin `==1.24.4`, the last CUDA 12 build; wheels ≥ 1.26 need CUDA 13), plus `nvidia-curand-cu12 nvidia-cufft-cu12`
 - `transcription-corrections`: comma-separated from=to phrase map applied to raw transcriptions (ASR mishear fixups, e.g. `clawed code=Claude Code,clawed=Claude`); case-insensitive whole-phrase, longest source first

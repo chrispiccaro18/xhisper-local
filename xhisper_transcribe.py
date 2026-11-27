@@ -279,12 +279,22 @@ def transcribe_parakeet(audio_path: str, model_name: str, device: str = "auto") 
 # cuts after the latest sentence end that the previous pass produced
 # identically and that has words after it (LocalAgreement-2, as in
 # Whisper-Streaming). It cuts nothing in the first 20s, so a shorter
-# dictation is transcribed whole at stop, exactly as without streaming.
-# Without an agreed sentence end it cuts at a pause once 30s are uncut.
+# dictation is transcribed whole, never in pieces. Without an agreed
+# sentence end it cuts at a pause once 30s are uncut.
+#
+# At stop, if nothing was said since the latest pass, that pass's text for
+# the audio since the last cut is reused instead of transcribing it again:
+# usually so when the user pauses a second before stopping. For a dictation
+# with no cuts that is the whole dictation, so it is done almost instantly.
+# The reused pass only lacks the silence after the pause that triggered it;
+# Parakeet's punctuation can shift with the length of trailing silence, so
+# this also stops the text depending on how long the user waited.
 #
 # Tested on real dictations of 37-67s: 0-0.6s left to transcribe at stop
 # instead of 2-3s, with fewer punctuation errors than the >25s VAD path, which
-# cuts every 20s even mid-word. Cutting at 600ms pauses split sentences.
+# cuts every 20s even mid-word. Cutting at 600ms pauses split sentences. On
+# 6-14s dictations with a 1.5s+ pause before stop: 0.05-0.3s instead of
+# 0.6-1.3s.
 
 _STREAM_RATE = 16000
 _STREAM_PAUSE_S = 1.0  # a pause this long triggers a pass
@@ -516,9 +526,13 @@ class StreamSession:
             following = next(j for j in range(agreed + 1, len(tokens)) if tokens[j].startswith(" "))
             offset = int((starts[agreed] + starts[following]) / 2 * _STREAM_RATE)
             self._cut_at(self._cut + offset, _join_tokens(tokens[:agreed + 1]))
+            # This pass already has the words after the cut: if nothing is
+            # said before the stop, reuse them rather than redo the tail
+            self._last_pass = (end, _join_tokens(tokens[following:]))
         elif uncut > _STREAM_MAX_UNCUT_S * _STREAM_RATE:
             before = (mid - self._cut) / _STREAM_RATE
             self._cut_at(mid, _join_tokens([t for t, s in zip(tokens, starts) if s < before]))
+            self._last_pass = (end, _join_tokens([t for t, s in zip(tokens, starts) if s >= before]))
 
     def _cut_at(self, sample: int, text: str):
         self._parts.append(text)
@@ -533,19 +547,32 @@ class StreamSession:
         size = int.from_bytes(f.read(4), "little")
         if 0 < size <= len(self._raw):
             del self._raw[size:]
-        self._feed(transcribe=False)  # VAD only, for the check below
+        self._feed(transcribe=False)  # VAD only, for the checks below
 
+        end = len(self._raw) // 2
+        # How long the user paused before stopping: a pass covers the whole
+        # tail only if a pause of _STREAM_PAUSE_S came after the last speech
+        pause = f"{(end - self._last_speech) / _STREAM_RATE:.1f}s pause before stop"
+        # nothing said since the latest pass, which ran at a pause after it
+        covered = self._last_pass is not None and self._last_speech <= self._last_pass[0]
         if not self._parts:
-            self.note = f"{self._passes} passes, nothing cut"
+            # Nothing cut (always so in the first 20s). If the latest pass
+            # already covers every word, reuse it instead of transcribing the
+            # whole file again: it misses only the non-speech after its pause.
+            if covered:
+                self.note = (f"streamed: {self._passes} passes, nothing cut, "
+                             f"all {end / _STREAM_RATE:.1f}s already done, {pause}")
+                return self._last_pass[1]
+            self.note = f"{self._passes} passes, nothing cut, {pause}"
             return None
-        uncut = (len(self._raw) // 2 - self._cut) / _STREAM_RATE
-        if self._last_pass and self._last_speech <= self._last_pass[0]:
-            tail, how = self._last_pass[1], "already done"  # nothing said since the latest pass
+        uncut = (end - self._cut) / _STREAM_RATE
+        if covered:
+            tail, how = self._last_pass[1], "already done"
         else:
-            tail = self.engine.transcribe_samples(self._samples(self._cut, len(self._raw) // 2))
+            tail = self.engine.transcribe_samples(self._samples(self._cut, end))
             how = "done at stop"
         self.note = (f"streamed: {self._passes} passes, {len(self._parts)} cuts, "
-                     f"last {uncut:.1f}s {how}")
+                     f"last {uncut:.1f}s {how}, {pause}")
         return " ".join(p for p in self._parts + [tail] if p)
 
 

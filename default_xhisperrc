@@ -30,7 +30,9 @@ transcription-server-idle : 5
 # Streaming (needs the transcription server): while you speak, the server
 # transcribes at your pauses, so a long dictation has little left to
 # transcribe when you stop. It only cuts the audio at sentence ends, and not
-# in the first 20s, so shorter dictations come out exactly as without it.
+# in the first 20s, so shorter dictations are transcribed whole. Pause about
+# a second before you stop and the text is usually ready at once, at any
+# length: the pass at that pause is reused.
 transcription-streaming   : on
 
 # Whisper Model Settings (whisper engine only):
