@@ -60,7 +60,8 @@ User presses hotkey → xhisper.sh toggles recording state
           │  else instruct LLM per post-process-standard
           ├─ command/email text: instruct LLM (post-process-model)
           └─ type result via daemon (insert-method ibus: commit it via
-             xhisper_ime; type only if no IBus text field has focus)
+             xhisper_ime; type only if no IBus text field has focus, or
+             if the statuses were typed)
 ```
 
 ### Character Input
@@ -70,7 +71,7 @@ User presses hotkey → xhisper.sh toggles recording state
 
 The `ascii2keycode_map` in xhispertool.c maps ASCII to Linux keycodes.
 
-With `insert-method: ibus`, the final text is one IBus commit (any Unicode, no clipboard; newlines become spaces when the field's input purpose is terminal). Focus check: IBus attaches the engine to an internal placeholder context when no app text field has focus and drops commits there. IBus >= 1.5.27 reports it via `focus-in-id` client "fake"; older IBus only via the placeholder's path, `InputContext_1` (an implementation detail). When a runtime-registered component goes away, ibus-daemon unsets an installed global engine (it only checks runtime-registered engines), so the service restores the user's engine after it exits (detached helper) and on its next start after a crash.
+With `insert-method: ibus`, the final text is one IBus commit (any Unicode, no clipboard; newlines become spaces when the field's input purpose is terminal). Focus check: IBus attaches the engine to an internal placeholder context when no app text field has focus and drops commits there. IBus >= 1.5.27 reports it via `focus-in-id` client "fake"; older IBus only via the placeholder's path, `InputContext_1` (an implementation detail). The hotkey's key grab moves IBus focus to the placeholder until the keys are released (GTK counts NotifyGrab as focus-out), so `begin`/`finish` wait for a real field until xhisper.sh's key-release margin (`--focus-wait-until`). One channel per dictation: if the statuses were typed, the text is typed too — a commit overtakes the typed backspaces still erasing the status, which then eat the end of the text. Known limit: nothing observes the actual key release, so a press held past the margin still loses — the start press falls back to typing during the grab (the typed status is lost or garbled, and its 14 backspaces at stop can eat text before the cursor), and a stop press held until the text is ready types it during the grab; README.md documents this under Troubleshooting ("Tap the shortcut"). When a runtime-registered component goes away, ibus-daemon unsets an installed global engine (it only checks runtime-registered engines), so the service restores the user's engine after it exits (detached helper) and on its next start after a crash.
 
 ## Configuration
 

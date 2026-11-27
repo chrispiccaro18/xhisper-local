@@ -333,6 +333,10 @@ This achieves ~1.5s end-to-end for standard dictation (transcription + the 0.6B 
 
 **Keyboard shortcut conflicts**: Avoid `Ctrl+Space` or `Alt+Space` as they conflict with browsers. Use `Alt+Shift+D` or `Ctrl+Alt+D` instead.
 
+**Tap the shortcut, don't hold it**: xhisper can't tell when you let go of the shortcut, so it assumes the keys are up 350ms after the press. Until you release them, your desktop keeps the keyboard for the shortcut: keys xhisper types meanwhile come out garbled or not at all, and IBus sees no text field. If you hold a press longer than that:
+- **Start press:** `(recording...)` is typed instead of shown as preedit, and may not appear. With `insert-method: ibus`, the rest of that dictation is typed too. The stop press still deletes the 14 characters of `(recording...)`, so the text before the cursor can lose up to 14 characters. The log shows `ime: no application text field has focus` for that start.
+- **Stop press:** if the text is ready before you let go, as it can be for a short dictation, it can come out garbled or go missing.
+
 **First run is slow**: Models download on first use and are cached in `~/.cache/xhisper/parakeet/` (Parakeet ~1GB), `~/.cache/huggingface/hub/` (Whisper) and `~/.ollama/models/` (Ollama). Pre-warm before your first dictation:
 ```sh
 python3 -c "import onnx_asr, pathlib; onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v2', pathlib.Path.home()/'.cache/xhisper/parakeet')"

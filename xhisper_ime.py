@@ -39,6 +39,11 @@ library, the service needs PyGObject with the IBus typelib):
   --serve          run the service in the foreground
   --stop-server    stop the running service
 
+begin and finish take --focus-wait-until US: if no application text field
+has focus, wait for one until US (wall clock, microseconds since the epoch)
+before deciding. A hotkey's key grab takes the focus until its keys are
+released; see wait_real_focus().
+
 Put -- before a text argument so a dictation that looks like an option
 stays text.
 
@@ -597,6 +602,25 @@ class ImeService:
         while not self.on_main(self.is_attached) and time.monotonic() < deadline:
             time.sleep(0.005)
 
+    def wait_real_focus(self, until_us) -> float:
+        """
+        If no application text field has focus, wait for one until until_us
+        (wall clock, microseconds since the epoch). Returns the ms waited,
+        0 if one had it already, or None if none got it in time.
+
+        A hotkey's key grab takes the focus: GTK counts a grab as the focus
+        leaving the window (NotifyGrab), so IBus attaches the engine to its
+        placeholder until the keys are released, ~30ms after the ungrab
+        (measured). A warm service answers well before a key is released.
+        """
+        start = time.monotonic()
+        wait_s = until_us / 1e6 - time.time() if until_us else 0
+        while not self.on_main(self.is_real_focus):
+            if time.monotonic() - start >= wait_s:
+                return None
+            time.sleep(0.005)
+        return (time.monotonic() - start) * 1000
+
     def handle(self, request: dict) -> dict:
         cmd = request.get("cmd")
         if cmd == "ping":
@@ -606,10 +630,14 @@ class ImeService:
                     **self.on_main(self.focus_info)}
         if cmd == "begin":
             self._activate_and_wait()
+            waited = self.wait_real_focus(request.get("focus_until_us"))
             info = self.on_main(self.focus_info)
             if not info["real"]:
+                log(f"no application text field has focus ({info['path']}); xhisper types instead")
                 self.on_main(self.deactivate)
                 return {"ok": True, "mode": "type", **info}
+            if waited:
+                log(f"a text field got the focus after {waited:.0f}ms (likely the hotkey's key grab ending)")
             self.on_main(lambda: self.set_status(str(request.get("status", ""))))
             return {"ok": True, "mode": "ime", **info}
         if cmd == "status":
@@ -618,6 +646,7 @@ class ImeService:
             return {"ok": True, "shown": self.on_main(lambda: self.set_status(str(request["text"])))}
         if cmd == "finish":
             self._activate_and_wait()
+            self.wait_real_focus(request.get("focus_until_us"))
             text = str(request["text"])
             fit = bool(request.get("fit", True))
             # Ask the field for the text around the cursor. IBus >= 1.5.28
@@ -884,7 +913,7 @@ def main(argv) -> int:
         return EXIT_ERROR
     cmd, args = argv[1], argv[2:]
 
-    idle_minutes, log_file, fit = DEFAULT_IDLE_MINUTES, None, True
+    idle_minutes, log_file, fit, focus_until_us = DEFAULT_IDLE_MINUTES, None, True, None
     rest = []
     i = 0
     while i < len(args):
@@ -900,6 +929,9 @@ def main(argv) -> int:
         elif args[i] == "--no-fit":
             fit = False
             i += 1
+        elif args[i] == "--focus-wait-until" and i + 1 < len(args):
+            focus_until_us = int(args[i + 1])
+            i += 2
         else:
             rest.append(args[i])
             i += 1
@@ -923,13 +955,15 @@ def main(argv) -> int:
 
     try:
         if cmd == "begin":
-            reply = call({"cmd": "begin", "status": text}, timeout_s=5)
+            reply = call({"cmd": "begin", "status": text, "focus_until_us": focus_until_us},
+                         timeout_s=5)
             return EXIT_OK if reply.get("mode") == "ime" else EXIT_NO_FIELD
         if cmd == "status":
             call({"cmd": "status", "text": text}, timeout_s=2)
             return EXIT_OK
         if cmd == "finish":
-            reply = call({"cmd": "finish", "text": text, "fit": fit}, timeout_s=5)
+            reply = call({"cmd": "finish", "text": text, "fit": fit,
+                          "focus_until_us": focus_until_us}, timeout_s=5)
             if not reply.get("ok"):
                 log(f"finish failed: {reply.get('error')}; typing instead")
                 return EXIT_UNAVAILABLE

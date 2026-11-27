@@ -634,9 +634,10 @@ transcribe() {
 # the keypress. Keep that margin, but measure it from the keypress, so work
 # done before the first keystroke no longer adds to it.
 KEY_RELEASE_MARGIN_US=350000
+KEY_RELEASE_DEADLINE_US=$(( SCRIPT_START_US + KEY_RELEASE_MARGIN_US ))
 
 wait_for_key_release() {
-  local remaining=$(( KEY_RELEASE_MARGIN_US - ($(date +%s%6N) - SCRIPT_START_US) ))
+  local remaining=$(( KEY_RELEASE_DEADLINE_US - $(date +%s%6N) ))
   if (( remaining > 0 )); then
     sleep "$(printf '%d.%06d' $(( remaining / 1000000 )) $(( remaining % 1000000 )))"
   fi
@@ -691,12 +692,20 @@ ime_status() {
 # one string; type it key by key where no IBus text field has focus (the
 # desktop, apps without IBus support such as the VS Code snap) or if the
 # input method is unavailable.
+#
+# If the statuses were typed, type the text too, even if a text field has
+# focus by now. The backspaces erasing the typed status reach the app later
+# than a commit would (uinput, X and the IBus key handling, vs IBus alone),
+# so the commit would land inside the status and the remaining backspaces
+# would delete the end of the dictation.
 insert_text() {
   local text="$1"
-  if use_ime; then
+  if use_ime && [ "$STATUS_MODE" = "ime" ]; then
     local -a fit=()
     [ "$smart_insert" = "off" ] && fit=(--no-fit)
-    ime_client finish "${fit[@]}" -- "$text"
+    # A quick stop can finish while the hotkey's key grab still holds the
+    # focus (see the start press): wait for it, as long as typing would
+    ime_client finish --focus-wait-until "$KEY_RELEASE_DEADLINE_US" "${fit[@]}" -- "$text"
     case $? in
       0) audit "COMMIT [${text:0:70}]"; return ;;
       5) audit "COMMIT outcome unknown; not typing it again: [${text:0:70}]"; return ;;
@@ -830,7 +839,11 @@ else
     # speech must not wait for that
     pw-record --channels=1 --rate=16000 "$RECORDING" &
     record_pid=$!
-    if ime_client begin --log-file "$LOGFILE" -- "(recording...)"; then
+    # Until the hotkey's keys are released, their key grab keeps the focus
+    # off the text field, and IBus reports no field: wait for it as long as
+    # typing the status would. A warm service answers well before that.
+    if ime_client begin --log-file "$LOGFILE" --focus-wait-until "$KEY_RELEASE_DEADLINE_US" \
+         -- "(recording...)"; then
       STATUS_MODE="ime"
       audit "PREEDIT [(recording...)]"
     else
