@@ -11,6 +11,10 @@
 #include <errno.h>
 #include <stdint.h>
 #include <libgen.h>
+#include <glob.h>
+#include <dlfcn.h>
+#include <time.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <linux/uinput.h>
@@ -35,6 +39,7 @@ int setup_uinput(void);
 int setup_socket(void);
 int run_daemon(void);
 void show_usage(void);
+int wait_keys_released(int max_ms);
 int run_client(int argc, char *argv[]);
 
 // ASCII to Linux keycode mapping for US QWERTY layout
@@ -329,6 +334,185 @@ int run_daemon() {
     return 0;
 }
 
+// wait-keys-released: wait until no keyboard key is held
+//
+// xhisper runs from a keyboard shortcut whose keys are usually still down
+// when it starts. Keys typed meanwhile arrive combined with the shortcut's
+// modifiers (Alt+Backspace deletes a word in many apps), and on X11 they
+// don't reach the app at all while the shortcut's key grab lasts. Reading
+// the actual key state lets xhisper go ahead as soon as the keys are up,
+// however long they are held. Sources, in order:
+//   1. the kernel's state of every keyboard (EVIOCGKEY), X11 and Wayland
+//      alike. Used only if every /dev/input/event* opens (the input group):
+//      with some unreadable, a held key could go unseen.
+//   2. the X server's (XQueryKeymap), on X11 only: under Wayland, Xwayland
+//      only sees keys sent to X windows. libX11 is loaded at run time, so
+//      building needs no X headers and Wayland-only systems need no libX11.
+// Exit 0 once no key is held (stdout: "<source> <ms waited>"), 3 if a key is
+// still held after max_ms (stdout: "<source> timeout"; stderr: which key),
+// 4 if neither source is available. These differ from the other commands'
+// 1 and 2, so a script running an older binary sees neither "released" nor
+// "held".
+
+#define KEYS_EXIT_RELEASED 0
+#define KEYS_EXIT_HELD 3
+#define KEYS_EXIT_UNAVAILABLE 4
+#define KEYS_POLL_US 5000
+// After the kernel shows the release, give the display server a moment to
+// process the same event before anything is typed (XQueryKeymap already is
+// the server's own state)
+#define KEYS_EVDEV_SETTLE_US 20000
+#define MAX_KEYBOARDS 64
+
+#define BITS_PER_LONG (sizeof(long) * 8)
+#define NLONGS(n) (((n) + BITS_PER_LONG - 1) / BITS_PER_LONG)
+
+typedef struct {
+    int fd;
+    char name[128];
+} keyboard_t;
+
+static long long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
+}
+
+// First keyboard key set in an EV_KEY bitmap, or 0. Codes from BTN_MISC up
+// are mouse, joystick and other buttons, not keys.
+static int first_key(const unsigned long *bits) {
+    for (int code = 1; code < BTN_MISC; code++) {
+        if ((bits[code / BITS_PER_LONG] >> (code % BITS_PER_LONG)) & 1) return code;
+    }
+    return 0;
+}
+
+// Open every input device that has keyboard keys, except our own virtual
+// keyboard. Returns how many, or -1 if any device could not be opened.
+static int open_keyboards(keyboard_t *kbds, int max) {
+    glob_t g;
+    int n = 0, unreadable = 0;
+    if (glob("/dev/input/event*", 0, NULL, &g) != 0) return -1;
+    for (size_t i = 0; i < g.gl_pathc; i++) {
+        int fd = open(g.gl_pathv[i], O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) {
+            unreadable = 1;
+            break;
+        }
+        char name[128] = "";
+        unsigned long caps[NLONGS(KEY_MAX + 1)] = {0};
+        ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
+        if (n == max || strcmp(name, "xhisper") == 0 ||  // see setup_uinput
+            ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(caps)), caps) < 0 || !first_key(caps)) {
+            close(fd);
+            continue;
+        }
+        kbds[n].fd = fd;
+        snprintf(kbds[n].name, sizeof(kbds[n].name), "%s", name);
+        n++;
+    }
+    globfree(&g);
+    if (unreadable) {
+        for (int i = 0; i < n; i++) close(kbds[i].fd);
+        return -1;
+    }
+    return n;
+}
+
+static int wait_keys_evdev(keyboard_t *kbds, int n, int max_ms) {
+    long long start = now_ms();
+    int was_held = 0;
+    for (;;) {
+        int held = 0;
+        const char *device = "";
+        for (int i = 0; i < n && !held; i++) {
+            unsigned long state[NLONGS(KEY_MAX + 1)] = {0};
+            if (ioctl(kbds[i].fd, EVIOCGKEY(sizeof(state)), state) < 0) continue;  // unplugged
+            held = first_key(state);
+            device = kbds[i].name;
+        }
+        long long waited = now_ms() - start;
+        if (!held) {
+            if (was_held) usleep(KEYS_EVDEV_SETTLE_US);
+            printf("evdev %lld\n", waited);
+            return KEYS_EXIT_RELEASED;
+        }
+        if (waited >= max_ms) {
+            printf("evdev timeout\n");
+            fprintf(stderr, "wait-keys-released: key %d on \"%s\" still held after %dms\n",
+                    held, device, max_ms);
+            return KEYS_EXIT_HELD;
+        }
+        was_held = 1;
+        usleep(KEYS_POLL_US);
+    }
+}
+
+static int wait_keys_x11(int max_ms) {
+    const char *session = getenv("XDG_SESSION_TYPE");
+    if (!getenv("DISPLAY") || getenv("WAYLAND_DISPLAY") ||
+        (session && strcmp(session, "wayland") == 0)) {
+        return KEYS_EXIT_UNAVAILABLE;
+    }
+    void *lib = dlopen("libX11.so.6", RTLD_LAZY | RTLD_LOCAL);
+    if (!lib) return KEYS_EXIT_UNAVAILABLE;
+    void *(*open_display)(const char *);
+    int (*query_keymap)(void *, char *);
+    int (*close_display)(void *);
+    *(void **)&open_display = dlsym(lib, "XOpenDisplay");
+    *(void **)&query_keymap = dlsym(lib, "XQueryKeymap");
+    *(void **)&close_display = dlsym(lib, "XCloseDisplay");
+    void *display = (open_display && query_keymap && close_display) ? open_display(NULL) : NULL;
+    if (!display) {
+        dlclose(lib);
+        return KEYS_EXIT_UNAVAILABLE;
+    }
+
+    long long start = now_ms();
+    int rc;
+    for (;;) {
+        unsigned char keys[32];
+        int held = 0;
+        query_keymap(display, (char *)keys);
+        for (int keycode = 8; keycode < 256 && !held; keycode++) {
+            if (keys[keycode / 8] & (1 << (keycode % 8))) held = keycode;
+        }
+        long long waited = now_ms() - start;
+        if (!held) {
+            printf("x11 %lld\n", waited);
+            rc = KEYS_EXIT_RELEASED;
+            break;
+        }
+        if (waited >= max_ms) {
+            printf("x11 timeout\n");
+            fprintf(stderr, "wait-keys-released: X keycode %d still held after %dms\n",
+                    held, max_ms);
+            rc = KEYS_EXIT_HELD;
+            break;
+        }
+        usleep(KEYS_POLL_US);
+    }
+    close_display(display);
+    dlclose(lib);
+    return rc;
+}
+
+int wait_keys_released(int max_ms) {
+    keyboard_t kbds[MAX_KEYBOARDS];
+    int n = open_keyboards(kbds, MAX_KEYBOARDS);
+    if (n > 0) {
+        int rc = wait_keys_evdev(kbds, n, max_ms);
+        for (int i = 0; i < n; i++) close(kbds[i].fd);
+        return rc;
+    }
+    int rc = wait_keys_x11(max_ms);
+    if (rc == KEYS_EXIT_UNAVAILABLE) {
+        fprintf(stderr, "wait-keys-released: no key state available: /dev/input/event* "
+                        "not all readable (input group) and no X11 session\n");
+    }
+    return rc;
+}
+
 // Client mode
 void show_usage() {
     fprintf(stderr,
@@ -336,6 +520,8 @@ void show_usage() {
         "  xhispertool paste            - Paste from clipboard (Ctrl+V)\n"
         "  xhispertool type <char>      - Type a single ASCII character\n"
         "  xhispertool backspace        - Press backspace\n"
+        "  xhispertool wait-keys-released [MAX_MS]\n"
+        "                               - Wait until no key is held (default 2000ms)\n"
         "\n"
         "Input switching keys:\n"
         "  xhispertool leftalt          - Press left alt\n"
@@ -355,6 +541,12 @@ int run_client(int argc, char *argv[]) {
     if (argc < 2) {
         show_usage();
         return 1;
+    }
+
+    // Reads key state itself; needs no daemon
+    if (strcmp(argv[1], "wait-keys-released") == 0) {
+        int max_ms = argc > 2 ? atoi(argv[2]) : 2000;
+        return wait_keys_released(max_ms > 0 ? max_ms : 2000);
     }
 
     int fd = socket(AF_UNIX, SOCK_DGRAM, 0);

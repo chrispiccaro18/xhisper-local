@@ -7,8 +7,9 @@ BINDIR = $(PREFIX)/bin
 
 all: xhispertool test
 
+# -ldl: dlopen of libX11 for wait-keys-released (part of libc since glibc 2.34)
 xhispertool: xhispertool.c
-	$(CC) $(CFLAGS) xhispertool.c -o xhispertool
+	$(CC) $(CFLAGS) xhispertool.c -o xhispertool -ldl
 	ln -sf xhispertool xhispertoold
 
 test: test.c

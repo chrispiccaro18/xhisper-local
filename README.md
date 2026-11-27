@@ -12,6 +12,7 @@ Dictation at cursor for Linux. Now with **local transcription** (Parakeet/Whispe
 
 - 🎤 **Parakeet-first local transcription** — NVIDIA TDT 0.6B via onnx-asr: ~2x more accurate than whisper-base in English, punctuation & capitalization built in, fast on CPU (whisper remains a config-switch away)
 - 🔥 **Model stays warm** — a background transcription server keeps Parakeet loaded between dictations (~5s → ~1s per transcription on a laptop CPU), loading while you speak and freeing its RAM after 5 idle minutes
+- ⏩ **Transcribes while you speak** — the server transcribes long dictations at your pauses as you go: on a laptop CPU, 37–67s of speech is transcribed 0.05–0.9s after you stop instead of 2.2–2.8s
 - 🧹 **Fast dictation cleanup** — optional [Spokenly cleanup-1](https://huggingface.co/spokenly/cleanup-1) pass (0.6B, ~0.1-0.3s) strips filler words, applies spoken corrections ("send it to Bob wait no Alice"), formats numbers, email and web addresses
 - ⚡ **No heavyweight LLM for everyday dictation** — the 0.6B cleanup model handles standard text; a bigger Ollama model is only used for command and email modes
 - 🧠 **AI-powered formatting** via local LLM (Ollama) for grammar, punctuation, and context-aware correction
@@ -20,6 +21,7 @@ Dictation at cursor for Linux. Now with **local transcription** (Parakeet/Whispe
 - 🚀 **GPU acceleration** with CUDA support (whisper engine)
 - 💻 **Works offline** after initial model download
 - ⌨️ **Types at cursor** in any application — or, with `insert-method: ibus`, inserts the whole dictation at once through IBus, with no clipboard and no keystrokes
+- ✍️ **Fits into your sentence** (`insert-method: ibus`) — spacing, the first word's capital and the final period adapt to the text around the cursor, so continuing a sentence no longer gives `I went to the store andThen we left.`
 
 ## Installation
 
@@ -67,7 +69,7 @@ Note: `ffmpeg` is **not** required — recording uses PipeWire's own WAV writer 
 
 ### Setup
 
-1. **Add user to input group** to access `/dev/uinput`:
+1. **Give your user access to the keyboard devices.** xhisper types through the virtual keyboard `/dev/uinput`, and reads the keyboards in `/dev/input` to tell when you've let go of the shortcut. The `input` group gives access to the keyboards, and to `/dev/uinput` where it belongs to that group:
 ```sh
 sudo usermod -aG input $USER
 ```
@@ -75,9 +77,14 @@ Then **log out and log back in** (restart is safer) for the group change to take
 
 Check by running:
 ```sh
-groups
+groups              # should list input
+ls -l /dev/uinput   # you need rw: through group input, or a "+" (an ACL for your user)
 ```
-You should see `input` in the output.
+`/dev/uinput` isn't group `input` everywhere. On some systems a udev rule grants it to the logged-in user instead (`ls` shows a `+`; Steam's udev rules do this, for one). If it is root-only, add a rule and reboot:
+```sh
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/99-uinput.rules
+```
+Reading the keyboards is optional: without it, xhisper uses the X server's key state on X11, and on Wayland assumes you let go within 350ms (see [Troubleshooting](#troubleshooting)).
 
 2. **Install Python dependencies**:
 ```sh
@@ -336,9 +343,7 @@ This achieves ~1.5s end-to-end for standard dictation (transcription + the 0.6B 
 
 **Keyboard shortcut conflicts**: Avoid `Ctrl+Space` or `Alt+Space` as they conflict with browsers. Use `Alt+Shift+D` or `Ctrl+Alt+D` instead.
 
-**Tap the shortcut, don't hold it**: xhisper can't tell when you let go of the shortcut, so it assumes the keys are up 350ms after the press. Until you release them, your desktop keeps the keyboard for the shortcut: keys xhisper types meanwhile come out garbled or not at all, and IBus sees no text field. If you hold a press longer than that:
-- **Start press:** `(recording...)` is typed instead of shown as preedit, and may not appear. With `insert-method: ibus`, the rest of that dictation is typed too. The stop press still deletes the 14 characters of `(recording...)`, so the text before the cursor can lose up to 14 characters. The log shows `ime: no application text field has focus` for that start.
-- **Stop press:** if the text is ready before you let go, as it can be for a short dictation, it can come out garbled or go missing.
+**Holding the shortcut**: xhisper waits until you let go of the shortcut's keys before it types or inserts anything, for up to 2s. Keys typed while they are down would arrive combined with the shortcut's modifiers, or on X11 go to the shortcut instead of the app, and IBus sees no text field until then. It reads the key state from the keyboards (`/dev/input`, readable with the `input` group) or, on X11, from the X server; `xhisper --log` shows `KEYS released after …ms (evdev)` or `(x11)` when it waited. On Wayland without the `input` group it can't tell (the log says `no key state available`) and assumes you let go within 350ms of the press. Holding a press longer there can garble what it types meanwhile, and since the stop press deletes the 14 characters of `(recording...)`, text before the cursor can lose up to 14 characters if the status never appeared.
 
 **First run is slow**: Models download on first use and are cached in `~/.cache/xhisper/parakeet/` (Parakeet ~1GB), `~/.cache/huggingface/hub/` (Whisper) and `~/.ollama/models/` (Ollama). Pre-warm before your first dictation:
 ```sh
@@ -354,7 +359,11 @@ This is a fork of [xhisper](https://github.com/imaginalnika/xhisper) by [imagina
 - **Parakeet as the default transcription engine** (NVIDIA TDT 0.6B via onnx-asr) — ~2x more accurate than whisper-base in English, punctuates natively, runs fast on CPU; whisper remains available via `transcription-engine`
 - **Fast dictation cleanup via [Spokenly cleanup-1](https://huggingface.co/spokenly/cleanup-1)** — a 0.6B model purpose-built for cleaning dictated text (filler words, spoken corrections, numbers, email/web addresses), ~0.1-0.3s per dictation; the script auto-creates a tuned Ollama alias with the correct prompt format and greedy decoding
 - **LLM formatting only where it earns its latency** — an instruct LLM (e.g., Gemma) is reserved for command/email modes
+- **Transcription server** — keeps Parakeet loaded and warmed up between dictations, loading while you speak
+- **Streaming transcription** — the server transcribes at your pauses while you speak, cutting only at sentence ends two passes agree on, so long dictations have little left at stop
 - **Text insertion through IBus** (`insert-method: ibus`) — the whole dictation as one input-method commit instead of key-by-key typing, with status messages as preedit text
+- **Smart insertion** (`smart-insert`, with IBus) — fits spacing, capitalization and the final period to the text around the cursor
+- **Waits for the shortcut's release** — reads the key state (kernel or X11) instead of pausing a fixed time, so typing starts as soon as you let go, however long you hold the keys
 - **Long-dictation safety** — VAD segmentation for long clips, tunable pause threshold (`vad-min-silence-ms`), and timeout-killed formatting falls back to raw text instead of truncating
 - **Local Whisper transcription** via `faster-whisper` (no Groq API)
 - **AI formatting** with local LLM support via Ollama

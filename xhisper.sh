@@ -656,17 +656,33 @@ transcribe() {
   echo "$transcription"
 }
 
-# The hotkey's modifiers (e.g. the Alt+Shift of Alt+Shift+D) are usually
-# still held when this script starts, and keys typed meanwhile arrive
-# combined with them — Alt+Backspace deletes a whole word in many apps. The
-# old fixed 0.2s pauses happened to put the first keystroke 0.33-0.40s after
-# the keypress. Keep that margin, but measure it from the keypress, so work
-# done before the first keystroke no longer adds to it.
+# The hotkey's keys (e.g. Alt+Shift+D) are usually still down when this
+# script starts. Keys typed meanwhile arrive combined with its modifiers
+# (Alt+Backspace deletes a whole word in many apps), and on X11 they go to
+# the shortcut's key grab instead of the app, which also has no focus
+# meanwhile. So wait until every key is up: xhispertool reads the key state,
+# the kernel's (with the input group) or else the X server's. Where it can't
+# (Wayland without the input group), assume they are up 350ms after the
+# keypress, where the old fixed pauses happened to put the first keystroke.
 KEY_RELEASE_MARGIN_US=350000
 KEY_RELEASE_DEADLINE_US=$(( SCRIPT_START_US + KEY_RELEASE_MARGIN_US ))
+KEY_RELEASE_MAX_MS=2000  # a key down longer than this isn't the hotkey's
+KEYS_RELEASED=""
 
 wait_for_key_release() {
-  local remaining=$(( KEY_RELEASE_DEADLINE_US - $(date +%s%6N) ))
+  [ -n "$KEYS_RELEASED" ] && return  # once per press
+  KEYS_RELEASED=1
+  local out remaining
+  out=$("$XHISPERTOOL" wait-keys-released "$KEY_RELEASE_MAX_MS" 2>>"$LOGFILE")
+  case $? in
+    0) [ "${out#* }" != "0" ] && audit "KEYS released after ${out#* }ms (${out%% *})"
+       return 0 ;;
+    3) audit "KEYS still held after ${KEY_RELEASE_MAX_MS}ms; going ahead"
+       return 0 ;;
+  esac
+  # 4: no key state (the reason is in the log); other codes: an older
+  # xhispertool without wait-keys-released
+  remaining=$(( KEY_RELEASE_DEADLINE_US - $(date +%s%6N) ))
   if (( remaining > 0 )); then
     sleep "$(printf '%d.%06d' $(( remaining / 1000000 )) $(( remaining % 1000000 )))"
   fi
@@ -709,6 +725,15 @@ ime_client() {
   python3 "$IME_SCRIPT" "$@" 2>>"$LOGFILE"
 }
 
+# Once the hotkey's keys are up, the shortcut's key grab ends and IBus moves
+# the focus back to the text field, ~30ms later on X11 (measured). Allow
+# more before deciding that no IBus text field has focus.
+IME_FOCUS_GRACE_US=150000
+
+ime_focus_deadline() {
+  echo $(( $(date +%s%6N) + IME_FOCUS_GRACE_US ))
+}
+
 # Replace the status message with preedit text: shown at the cursor but
 # never part of the document, so there is nothing to delete afterwards and
 # no hotkey modifiers to wait for
@@ -732,9 +757,10 @@ insert_text() {
   if use_ime && [ "$STATUS_MODE" = "ime" ]; then
     local -a fit=()
     [ "$smart_insert" = "off" ] && fit=(--no-fit)
-    # A quick stop can finish while the hotkey's key grab still holds the
-    # focus (see the start press): wait for it, as long as typing would
-    ime_client finish --focus-wait-until "$KEY_RELEASE_DEADLINE_US" "${fit[@]}" -- "$text"
+    # The text can be ready while the stop press's keys are still down, and
+    # until they are up the shortcut holds the focus (see the start press)
+    wait_for_key_release
+    ime_client finish --focus-wait-until "$(ime_focus_deadline)" "${fit[@]}" -- "$text"
     case $? in
       0) audit "COMMIT [${text:0:70}]"; return ;;
       5) audit "COMMIT outcome unknown; not typing it again: [${text:0:70}]"; return ;;
@@ -875,10 +901,12 @@ else
     # speech must not wait for that
     pw-record --channels=1 --rate=16000 "$RECORDING" &
     record_pid=$!
-    # Until the hotkey's keys are released, their key grab keeps the focus
-    # off the text field, and IBus reports no field: wait for it as long as
-    # typing the status would. A warm service answers well before that.
-    if ime_client begin --log-file "$LOGFILE" --focus-wait-until "$KEY_RELEASE_DEADLINE_US" \
+    # Until the hotkey's keys are up, the shortcut's key grab keeps the focus
+    # off the text field and IBus reports no field: decide after the release.
+    # Meanwhile, start the input method's service if it isn't running (~0.1s).
+    ime_client start --log-file "$LOGFILE" &
+    wait_for_key_release
+    if ime_client begin --log-file "$LOGFILE" --focus-wait-until "$(ime_focus_deadline)" \
          -- "(recording...)"; then
       STATUS_MODE="ime"
       audit "PREEDIT [(recording...)]"
