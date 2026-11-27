@@ -197,7 +197,7 @@ Configuration is read from `~/.config/xhisper/xhisperrc`:
 
 **Parakeet models:** `nemo-parakeet-tdt-0.6b-v2` (English, best accuracy), `nemo-parakeet-tdt-0.6b-v3` (25 languages, auto-detects)
 
-**Transcription server:** loading Parakeet and ONNX Runtime's slow first run cost ~5s per dictation, for under 1s of actual recognition. With `transcription-server : on` (the default), a background process keeps the model loaded and warmed up between dictations. It starts when you begin recording, so the first load overlaps with you speaking, and exits after `transcription-server-idle` minutes (default 5) without a dictation, freeing its ~2.5GB of RAM. If it is unavailable for any reason, xhisper falls back to the one-shot path. Measured on an Intel i5-12500H laptop (CPU only), from the second keypress to typed text with cleanup-1:
+**Transcription server:** loading Parakeet and ONNX Runtime's slow first run cost ~5s per dictation, for under 1s of actual recognition. With `transcription-server : on` (the default), a background process keeps the model loaded and warmed up between dictations. It starts when you begin recording, so the first load overlaps with you speaking, and exits after `transcription-server-idle` minutes (default 5) without a dictation, freeing its ~2.5GB of RAM. If it is unavailable for any reason, xhisper falls back to the one-shot path; if it is only busy, xhisper waits for it. One-shot transcriptions run one at a time, each loading its own model. Measured on an Intel i5-12500H laptop (CPU only), from the second keypress to typed text with cleanup-1:
 
 | | One-shot | Server |
 |---|---|---|
@@ -344,6 +344,8 @@ This achieves ~1.5s end-to-end for standard dictation (transcription + the 0.6B 
 **Keyboard shortcut conflicts**: Avoid `Ctrl+Space` or `Alt+Space` as they conflict with browsers. Use `Alt+Shift+D` or `Ctrl+Alt+D` instead.
 
 **Holding the shortcut**: xhisper waits until you let go of the shortcut's keys before it types or inserts anything, for up to 2s. Keys typed while they are down would arrive combined with the shortcut's modifiers, or on X11 go to the shortcut instead of the app, and IBus sees no text field until then. It reads the key state from the keyboards (`/dev/input`, readable with the `input` group) or, on X11, from the X server; `xhisper --log` shows `KEYS released after …ms (evdev)` or `(x11)` when it waited. On Wayland without the `input` group it can't tell (the log says `no key state available`) and assumes you let go within 350ms of the press. Holding a press longer there can garble what it types meanwhile, and since the stop press deletes the 14 characters of `(recording...)`, text before the cursor can lose up to 14 characters if the status never appeared.
+
+Holding the shortcut also makes the desktop repeat it, about 30 times a second after half a second. xhisper ignores those repeats for as long as you hold it (the log notes `PRESS held for …ms: ignored N key repeats`), so one press is one toggle however long it lasts. Let go before pressing again: a press within a quarter of a second of the last repeat counts as one more. Without key state it treats the first second of a press as held.
 
 **First run is slow**: Models download on first use and are cached in `~/.cache/xhisper/parakeet/` (Parakeet ~1GB), `~/.cache/huggingface/hub/` (Whisper) and `~/.ollama/models/` (Ollama). Pre-warm before your first dictation:
 ```sh

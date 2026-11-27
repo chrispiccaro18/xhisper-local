@@ -806,9 +806,21 @@ def _server_call(request: dict, timeout_s: float) -> dict:
     server_dir = _server_dir()
     if server_dir is None:
         raise OSError("no private runtime directory")
+    deadline = time.monotonic() + timeout_s
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
         conn.settimeout(timeout_s)
-        conn.connect(str(server_dir / "transcribe.sock"))
+        while True:
+            try:
+                conn.connect(str(server_dir / "transcribe.sock"))
+                break
+            except BlockingIOError:
+                # Its backlog is full (EAGAIN): the server is busy, not gone.
+                # Wait for a place: falling back to a model of our own, every
+                # client of a busy server did, ~2.5GB each.
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+        conn.settimeout(max(deadline - time.monotonic(), 1))
         conn.sendall((json.dumps(request) + "\n").encode())
         return json.loads(_recv_line(conn))
 
@@ -863,6 +875,22 @@ def watch_recording(audio_path: str, model_name: str, device: str) -> bool:
         print(f"Streaming unavailable ({reply['error']})", file=sys.stderr)
         return False
     return True
+
+
+_model_slot = None  # held until exit, see _wait_for_model_slot
+
+
+def _wait_for_model_slot():
+    """
+    Wait until no other process is transcribing in-process: each loads a
+    model of its own (~2.5GB for parakeet, up to ~3GB for whisper large).
+    """
+    global _model_slot
+    server_dir = _server_dir()
+    if server_dir is None:
+        return
+    _model_slot = open(server_dir / "oneshot.lock", "a")
+    fcntl.flock(_model_slot, fcntl.LOCK_EX)
 
 
 def stop_server() -> bool:
@@ -1003,8 +1031,10 @@ def main():
             if args.use_server:
                 result = transcribe_via_server(args.audio_file, args.parakeet_model, args.device)
             if result is None:
+                _wait_for_model_slot()
                 result = transcribe_parakeet(args.audio_file, args.parakeet_model, args.device)
         else:
+            _wait_for_model_slot()
             result = transcribe_file(
                 args.audio_file,
                 model_size=args.model,

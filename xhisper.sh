@@ -198,6 +198,55 @@ fi
 # Command-line mode overrides config
 [ -n "$POST_PROCESS_MODE" ] && post_process_mode="$POST_PROCESS_MODE"
 
+# A held shortcut repeats: after the key repeat delay (~500ms) the desktop
+# runs xhisper again at the repeat rate, ~30 times a second, and each run
+# toggled the recording. Holding it once started and stopped dictations
+# until their transcriptions had used up all memory. So a press takes this
+# lock and keeps it while its keys are held, then as long as repeats keep
+# coming; a run that finds it taken is a repeat and only notes its time.
+PRESS_LOCK="${XDG_RUNTIME_DIR:-/tmp}/xhisper.press"
+PRESS_REPEATS="${XDG_RUNTIME_DIR:-/tmp}/xhisper.repeats"
+PRESS_KEYS_MAX_MS=2000  # longer is a stuck key, not the shortcut's
+PRESS_NO_KEY_STATE_HOLD=1  # seconds without key state: past the repeat delay
+PRESS_REPEAT_GAP_US=250000  # repeats come every ~30ms; none for this long: over
+
+# Runs in the background, holding the lock until the press is over
+hold_press_lock() {
+  local released last now n
+  "$XHISPERTOOL" wait-keys-released "$PRESS_KEYS_MAX_MS" > /dev/null 2>&1
+  case $? in
+    0|3) ;;  # released, or still held after PRESS_KEYS_MAX_MS
+    *) sleep "$PRESS_NO_KEY_STATE_HOLD" ;;  # no key state (4), or an older xhispertool
+  esac
+  # A repeat sent just before the release can still be starting up
+  released=$(date +%s%6N)
+  while :; do
+    last=$(tail -n 1 "$PRESS_REPEATS" 2>/dev/null)
+    [[ "$last" =~ ^[0-9]+$ ]] && (( last > released )) || last=$released
+    now=$(date +%s%6N)
+    (( now - last < PRESS_REPEAT_GAP_US )) || break
+    sleep 0.05
+  done
+  n=$(wc -l < "$PRESS_REPEATS" 2>/dev/null)
+  if (( n > 0 )); then
+    echo "[$(date +%H:%M:%S.%3N)] PRESS held for $(( (last - SCRIPT_START_US) / 1000 ))ms: ignored $n key repeats" >> "$LOGFILE"
+  fi
+}
+
+if exec {press_lock_fd}>>"$PRESS_LOCK"; then
+  flock -n "$press_lock_fd"
+  case $? in
+    0) : > "$PRESS_REPEATS"
+       # The holder shares the lock; this script lets go of it right away,
+       # so nothing it starts (pw-record, the IBus service) inherits it
+       hold_press_lock > /dev/null 2>> "$LOGFILE" &
+       exec {press_lock_fd}>&- ;;
+    1) echo "$SCRIPT_START_US" >> "$PRESS_REPEATS"  # taken: a key repeat
+       exit 0 ;;
+    *) exec {press_lock_fd}>&- ;;  # no flock(1): go ahead unguarded
+  esac
+fi
+
 # Add CUDA library paths for faster-whisper.
 # pip-installed nvidia packages (cublas, cudnn, nvrtc) are not on the default
 # loader path, and ctranslate2 needs them when it runs the encoder on the GPU.
