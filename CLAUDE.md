@@ -58,6 +58,9 @@ User presses hotkey → xhisper.sh toggles recording state (a held shortcut
       └─ Not silent:
           ├─ transcribe via parakeet (default; through the server when on)
           │  or faster-whisper
+          ├─ no text: "(no speech detected)" if the engine exited 0 (noise
+          │  that passed the silence check), "(transcription failed - see
+          │  xhisper --log)" if it exited non-zero; exit
           ├─ standard text: cleanup model if cleanup-model set (native
           │  "text:..." prompt; the tuned alias appends the "\nout:" marker),
           │  else instruct LLM per post-process-standard
