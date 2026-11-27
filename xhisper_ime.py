@@ -24,6 +24,8 @@ types the text instead; see is_real_focus().
 Client commands (used by xhisper.sh; the client needs only the standard
 library, the service needs PyGObject with the IBus typelib):
 
+  start            start the service unless it is running. Exit 0 once it
+                   answers; 4: unavailable (begin logs why)
   begin STATUS     start the service if needed, activate the engine and
                    show STATUS as preedit. Exit 0: the input method will
                    show statuses; 3: no IBus text field has focus (type
@@ -42,7 +44,7 @@ library, the service needs PyGObject with the IBus typelib):
 begin and finish take --focus-wait-until US: if no application text field
 has focus, wait for one until US (wall clock, microseconds since the epoch)
 before deciding. A hotkey's key grab takes the focus until its keys are
-released; see wait_real_focus().
+released, and the focus comes back shortly after; see wait_real_focus().
 
 Put -- before a text argument so a dictation that looks like an option
 stays text.
@@ -610,8 +612,10 @@ class ImeService:
 
         A hotkey's key grab takes the focus: GTK counts a grab as the focus
         leaving the window (NotifyGrab), so IBus attaches the engine to its
-        placeholder until the keys are released, ~30ms after the ungrab
-        (measured). A warm service answers well before a key is released.
+        placeholder until the keys are released, and back to the field ~30ms
+        after the ungrab (measured). xhisper.sh calls begin and finish once
+        the keys are up (xhispertool wait-keys-released) and allows a grace
+        period for that.
         """
         start = time.monotonic()
         wait_s = until_us / 1e6 - time.time() if until_us else 0
@@ -948,6 +952,8 @@ def main(argv) -> int:
             print("No input-method service running", file=sys.stderr)
             return EXIT_ERROR
 
+    if cmd == "start":
+        return EXIT_OK if start_service(idle_minutes, log_file) else EXIT_UNAVAILABLE
     if cmd in ("begin", "probe"):
         if not start_service(idle_minutes, log_file):
             log("input-method service unavailable; typing instead")
